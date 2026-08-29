@@ -1,0 +1,15 @@
+# Test harness sandboxes (created and removed per case, but never commit one)
+harness-home-*/
+
+# Local scratch
+*.bak
+*.orig
+*.tmp
+.DS_Store
+
+# Never commit a real usage aggregate or state file -- they describe your own
+# token spend and your own project paths.
+usage-hourly.jsonl
+share.json
+.pace-trend.json
+.plan-usage.json
