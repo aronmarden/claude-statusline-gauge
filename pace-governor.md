@@ -20,7 +20,7 @@ jq -c 'def r($n): if . == null then null else (. * $n | round) / $n end;
      | ($g.seven_day.hours_to_reset // $g.five_hour.hours_to_reset) as $h
      | if $t == null or $h == null then null else (now - ($t - $h * 3600) | floor) end) as $age
   | {age_s: $age, five_hour: win($g.five_hour; 5), seven_day: win($g.seven_day; 168),
-     fable: win($g.fable; 168)}
+     premium: (win($g.premium; 168) + {family: $g.premium.family})}
   | . + {worst: ([.five_hour.lands, .seven_day.lands] | map(select(. != null)) | max)}
 ' ~/.claude/.pace-trend.json 2>/dev/null
 ```
@@ -48,9 +48,14 @@ trigger: `ratio > 1` and `lands > 100` are the same condition, and near a reset 
 misleading one — 5× with ten minutes left lands you about one point higher. Use it for
 magnitude only, and only once it has held across several refreshes.
 
-`fable` is the premium-model **share** of the 7-day window: a self-imposed target, not a plan
-limit, and its spend is already counted inside `seven_day`. `fable.lands` over 100 means the
-model mix is too expensive — move mechanical work down a tier. It is never a reason to stop.
+`premium` is one model family's **share** of the 7-day window — the family that costs more per
+token than the rest of your mix, named in `premium.family`. It is a self-imposed target, not a
+plan limit, and its spend is already counted inside `seven_day`, which is why it is deliberately
+left out of `worst`. `premium.lands` over 100 means the model mix is too expensive — move
+mechanical work off that family and down a tier. It is never a reason to stop.
+
+`premium.family` null means this install does not run a premium family at all. There is nothing
+to ration, so ignore the whole block rather than reading its nulls as zeros.
 
 **null means unknown — never zero, never fine.** Skip a null window and govern on the other.
 `five_hour` is null for much of every cycle by design.

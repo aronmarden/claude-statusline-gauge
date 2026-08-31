@@ -9,12 +9,17 @@ lands you if you keep going.
 ```
 Opus 5 │ …/dev/src/checkout-service  ctx 38% [█████░░░░░░░] 76.4k/200k
 sid:a3f19c7d  $4.62  1h31m  +214/-87  sess ↑236.7k/↓31.2k (cache 3.7M)
-5h ▕▓▓▓▓▓░░░░░░░┃░░░░░░░▏23.00% -37.00% (2h behind)  0.20×→  lands 38%  7d ▕▓▓▓▓▓▓▓▓┃▓▓▓░░░░░░░░▏60.50% +17.64% (30h ahead)  0.44×→  lands 78%  fbl ▕▓▓▓░░░░░┃░░░░░░░░░░░▏16.46% -26.39% (44h behind)  0.17×→  lands 30%
+5h ▕▓▓▓▓▓░░░░░░░┃░░░░░░░▏23.00% -37.00% (2h behind)  0.20×→  lands 38%  7d ▕▓▓▓▓▓▓▓▓┃▓▓▓░░░░░░░░▏60.50% +17.64% (30h ahead)  0.44×→  lands 78%  fable ▕▓▓▓░░░░░┃░░░░░░░░░░░▏16.46% -26.39% (44h behind)  0.17×→  lands 30%
 ```
 <!-- /render:full -->
 
-That is three gauges — the 5-hour window, the 7-day window, and the premium model's share of
+That is three gauges — the 5-hour window, the 7-day window, and one model family's share of
 the 7-day window — plus the usual cwd/branch/context/session information above them.
+
+The third gauge is labelled with whichever family it is rationing (`fable` above), and it does
+not appear at all unless you actually run a family that costs more than the rest of your mix.
+Most installs will see two gauges, which is the honest answer for most installs — see
+[The premium gauge](#the-premium-gauge-and-when-it-is-not-there).
 
 It is coloured in a real terminal. Everything below describes what each piece means.
 
@@ -85,7 +90,7 @@ are, and it cannot tell you how fast you are moving.
 | `(30h ahead)` | payload + clock | the same gap expressed in the window's own time |
 | `0.44×` burn ratio | **token history** | a rate needs real spend over real time |
 | `lands 78%` | **token history** | it is a projection of that rate |
-| the whole `fbl` gauge | **token history** | the payload has no premium-model window at all |
+| the whole premium gauge | **token history** | the payload has no premium-model window at all |
 
 So there are two tiers:
 
@@ -99,7 +104,7 @@ So there are two tiers:
 
 Two things to notice. The rate half of each gauge is **omitted**, not shown as a permanent
 `–`: a `–` in this status line always means "there is a source and it cannot answer right
-now", never "you did not install something". And the 7-day percentage reads `60.00%` here
+now", never "you did not install something". And the 7-day percentage reads `60.50%` here
 against `60.50%` above — the payload sends whole numbers only, and one whole point of a
 7-day window is worth far more than even a flat-out hour of work, so without a token source
 the figure is exactly right and simply does not move for hours at a time.
@@ -163,16 +168,16 @@ Each gauge is the same six pieces:
 | `lands 78%` | where the window ends up at reset if the current rate holds. Over 100% is always red |
 | `!` | the two independent sources for this percentage disagree by more than 5 points (see below) |
 | `prov` | fewer than 3 payload samples so far — the reading is a single raw sample, not a median. Clears itself within a minute or two of starting Claude Code |
-| `0.00×` | a **measured zero**: the source is present and the answer really is "nothing spent this window", so `lands` equals the used% — you stay exactly where you are. Deliberately not `–` |
+| `0.44×` | a **measured zero**: the source is present and the answer really is "nothing spent this window", so `lands` equals the used% — you stay exactly where you are. Deliberately not `–` |
 | `–` | genuinely absent data — there is nothing to measure. Never a guess, and never confused with a measured zero |
 
-The three windows:
+The windows (the third is conditional -- see below):
 
 | | |
 |---|---|
 | `5h` | the rolling 5-hour window |
 | `7d` | the rolling 7-day window |
-| `fbl` | the premium model family (weighted 2×, since it costs about twice as much) as a share of the 7-day window. **This is a policy you set, not a limit the API enforces** — the default is "no more than half of the 7-day window should be premium tokens", configurable with `CLAUDE_STATUSLINE_PREMIUM_SHARE` |
+| `fable` | one model family's share of the 7-day window, weighted by what it costs. The label is the family's own name, so the gauge says what it is rationing. **This is a policy you set, not a limit the API enforces** — the default is "no more than half of the 7-day window should go to that family", configurable with `CLAUDE_STATUSLINE_PREMIUM_SHARE`. It is absent unless you run such a family — see below |
 
 ## Position and rate answer different questions
 
@@ -274,14 +279,76 @@ Environment variables, all optional:
 | `CLAUDE_STATUSLINE_COLLECTOR` | path to the collector (default `~/.claude/usage-collector.sh`) |
 | `CLAUDE_STATUSLINE_THROTTLE` | seconds between real collector runs (default `300`) |
 | `CLAUDE_STATUSLINE_RETAIN_DAYS` | days of hourly history to keep (default `9`) |
-| `CLAUDE_STATUSLINE_PREMIUM_SHARE` | the `fbl` gauge's target share of the 7-day window (default `0.5`) |
+| `CLAUDE_STATUSLINE_PREMIUM_SHARE` | the premium gauge's target share of the 7-day window (default `0.5`) |
+| `CLAUDE_STATUSLINE_PREMIUM_FAMILY` | which family the premium gauge rations: an extended regex matched case-insensitively against the model id. Default: auto-detected (see below) |
+| `CLAUDE_STATUSLINE_PREMIUM_WEIGHT` | what one of its tokens costs in opus-equivalents (default: the cost table's figure, else `1`) |
+| `CLAUDE_STATUSLINE_PREMIUM_LABEL` | what the premium gauge is called on screen (default: the family's name) |
 | `CLAUDE_STATUSLINE_PROJECTS_DIR` | transcript location (default `~/.claude/projects`) |
 
 Set them in `settings.json` under `env`, or in the `statusLine.command` itself.
 
+`CLAUDE_STATUSLINE_PREMIUM_*` are read by the **collector**, which resolves them once and writes
+the answer into `share.json`; the status line reads it back from there rather than working it out
+again. That is deliberate: a collector counting one set of rows while the gauge weighted another
+would be a silently wrong number, not a visible bug. Changing `PREMIUM_FAMILY` changes how rows
+are classified, and rows already written keep their old family, so follow the change with
+`~/.claude/usage-collector.sh --full`.
+
 The gauge line degrades on narrow terminals in a fixed order: the `(30h ahead)` parentheticals
-go first (`fbl`, then `5h`, then `7d`), then bars (`fbl`, then `5h`). The 7-day bar and every
+go first (premium, then `5h`, then `7d`), then bars (premium, then `5h`). The 7-day bar and every
 percentage always survive.
+
+## The premium gauge, and when it is not there
+
+The third gauge exists to ration **one** model family: the one that costs materially more per
+token than the rest of your mix, so that moving mechanical work off it actually buys back
+window. Which family that is depends entirely on what you run, so nothing is hardcoded to a
+model name.
+
+**The default is auto-detection.** The collector keeps a cost table of families that cost more
+than the opus-equivalent baseline, priciest first, and picks the priciest one that actually
+appears in your retained history. If none of them do, it writes no premium block and **the
+gauge does not render**. You get two gauges.
+
+That last part is the point. A gauge for a policy you are not exercising is noise, and a `0.00%`
+bar with `-50.40% (3.5d behind)` beside it is worse than noise: it reads as a measurement that
+you are *under*-using something you should use more. So it is not rendered rather than rendered
+empty.
+
+**Three states, three different renders**, and they are deliberately not interchangeable:
+
+| | |
+|---|---|
+| you do not run a premium family | no third gauge at all. Nothing is claimed |
+| you do, but spent none of it this window | a real `0.00%`, with `0.44×` and `lands 78%`. A measurement |
+| you do, but there is no usage data yet | `–`. Unknown, and it says so |
+
+The difference between the first two is where the history is read from. Selection looks at the
+**whole retained file** (`CLAUDE_STATUSLINE_RETAIN_DAYS`, default 9 days); the share is measured
+over the **trailing 7 days**. Retention is deliberately longer than the window, so "used it last
+week, none this window" still selects the family and reports a genuine zero, while "never appears
+at all" selects nothing. Nine days of silence and the gauge stops rendering — which is the honest
+statement, because at that point there is no evidence left that you run it.
+
+**Naming a family yourself opts you in unconditionally.** Setting `CLAUDE_STATUSLINE_PREMIUM_FAMILY`
+*is* the statement that the policy applies to you, so the gauge renders even at zero:
+
+```sh
+# ration opus against your sonnet/haiku work
+CLAUDE_STATUSLINE_PREMIUM_FAMILY=opus
+CLAUDE_STATUSLINE_PREMIUM_LABEL=opus
+CLAUDE_STATUSLINE_PREMIUM_SHARE=0.4        # no more than 40% of the window
+
+# something that costs 3x the baseline
+CLAUDE_STATUSLINE_PREMIUM_FAMILY='big-model|bigger-model'
+CLAUDE_STATUSLINE_PREMIUM_WEIGHT=3
+CLAUDE_STATUSLINE_PREMIUM_LABEL=big
+```
+
+The weight is that family's cost ratio in opus-equivalents, not a universal constant. Opus is
+`1` by definition — it is the unit. A weight above `1` is what makes the gauge a *cost* claim
+rather than a plain token-mix ratio, which is why auto-detection only ever picks from the cost
+table and why a weight-`1` family has to be opted into by name.
 
 ## Pace governor (opt-in)
 
@@ -350,7 +417,7 @@ it by hand without uninstalling the status line, delete everything between and i
 | `~/.claude/.pace-trend.json` | rolling payload samples, calibrated allowances, trend history. Small, rewritten each refresh |
 | `~/.claude/.plan-usage.json` | the current window snapshot, so Claude itself can read your remaining capacity when you ask it to |
 | `~/.claude/usage/usage-hourly.jsonl` | per-hour token aggregates, pruned to 9 days |
-| `~/.claude/usage/share.json` | the premium-model share of the last 7 days |
+| `~/.claude/usage/share.json` | which family is the premium one, what it weighs, and its share of the last 7 days |
 | `~/.claude/CLAUDE.md` | one delimited block, **only** with `--with-governor`; backed up first |
 
 All local, all removed by the uninstaller.
@@ -377,9 +444,13 @@ down there and that is where it once produced a reading of 799%. The 5-hour wind
 above that line, and keeps it. Until then the position half is fully live and the rate half
 honestly says it does not know.
 
-**No `fbl` gauge.** It only appears when `share.json` exists *and* the 7-day gauge has a
-calibrated allowance, which needs the 7-day window past 20% used. Below that it is deliberately
-absent rather than wrong.
+**No third gauge.** Most often this is correct and deliberate: nothing in your history costs
+more than the baseline, so there is no premium family to ration. Check with
+`~/.claude/usage-collector.sh --status`, which prints what it resolved. Otherwise the gauge also
+needs `share.json` to exist *and* the 7-day gauge to have a calibrated allowance, which needs the
+7-day window past 20% used. Below that it is deliberately absent rather than wrong. To ration a
+family the cost table does not know about, name it with `CLAUDE_STATUSLINE_PREMIUM_FAMILY` and
+re-run the collector with `--full`.
 
 **Everything reads `–`, or the percentage looks stuck.** Delete `~/.claude/.pace-trend.json`;
 it rebuilds from scratch within a few refreshes.

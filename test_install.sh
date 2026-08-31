@@ -188,32 +188,48 @@ R7=$(( $(date +%s) + 302400 ))   # 3.5 days out, so the 7d window is half gone
 
 # H9. the collector is present: lands_at is used as-is, and the age is derived
 # from resets_at minus hours_to_reset, which is the only clock the file has.
-out=$(gov_run "{\"gauge\":{\"seven_day\":{\"median\":50,\"hours_to_reset\":84,\"resets_at\":$R7,\"lands_at\":92,\"burn_ratio\":1.1},\"five_hour\":{},\"fable\":{}}}")
+out=$(gov_run "{\"gauge\":{\"seven_day\":{\"median\":50,\"hours_to_reset\":84,\"resets_at\":$R7,\"lands_at\":92,\"burn_ratio\":1.1},\"five_hour\":{},\"premium\":{}}}")
 chk "H9 worst is the 7d projection" "$(printf '%s' "$out" | jq -r '.worst')" "92"
 chk "H9 age reads fresh"            "$(printf '%s' "$out" | jq -r '.age_s | if . >= 0 and . < 60 then "fresh" else "stale" end')" "fresh"
 
 # H10. no collector: no lands_at anywhere, so the projection falls back to
 # used% over the elapsed fraction -- half the window gone at 50% used lands 100.
-out=$(gov_run "{\"gauge\":{\"seven_day\":{\"median\":50,\"hours_to_reset\":84,\"resets_at\":$R7},\"five_hour\":{},\"fable\":{}}}")
+out=$(gov_run "{\"gauge\":{\"seven_day\":{\"median\":50,\"hours_to_reset\":84,\"resets_at\":$R7},\"five_hour\":{},\"premium\":{}}}")
 chk "H10 degraded projection"       "$(printf '%s' "$out" | jq -r '.seven_day.lands')" "100"
 chk "H10 ratio stays unknown"       "$(printf '%s' "$out" | jq -r '.seven_day.ratio')" "null"
 
 # H11. nothing known at all reads null, never 0 -- "unknown" and "fine" must
 # not render the same.
-out=$(gov_run '{"gauge":{"seven_day":{},"five_hour":{},"fable":{}}}')
+out=$(gov_run '{"gauge":{"seven_day":{},"five_hour":{},"premium":{}}}')
 chk "H11 unknown is null, not zero" "$(printf '%s' "$out" | jq -r '[.age_s, .worst] | map(tostring) | join(",")')" "null,null"
 
 # H13. both windows projecting: the TIGHTER one has to govern. 5h is a burst
 # limit and can be the one about to bite while 7d still reads comfortable.
 R5=$(( $(date +%s) + 7200 ))
-out=$(gov_run "{\"gauge\":{\"seven_day\":{\"median\":40,\"hours_to_reset\":84,\"resets_at\":$R7,\"lands_at\":60,\"burn_ratio\":0.7},\"five_hour\":{\"median\":70,\"hours_to_reset\":2,\"resets_at\":$R5,\"lands_at\":120,\"burn_ratio\":1.8},\"fable\":{}}}")
+out=$(gov_run "{\"gauge\":{\"seven_day\":{\"median\":40,\"hours_to_reset\":84,\"resets_at\":$R7,\"lands_at\":60,\"burn_ratio\":0.7},\"five_hour\":{\"median\":70,\"hours_to_reset\":2,\"resets_at\":$R5,\"lands_at\":120,\"burn_ratio\":1.8},\"premium\":{}}}")
 chk "H13 the tighter window governs"   "$(printf '%s' "$out" | jq -r '.worst')" "120"
 chk "H13 the looser one still reported" "$(printf '%s' "$out" | jq -r '.seven_day.lands')" "60"
 
 # H12. a stale file is not a quiet one: the derived age has to show the gap.
-out=$(gov_run "{\"gauge\":{\"seven_day\":{\"median\":90,\"hours_to_reset\":84,\"resets_at\":$(( R7 - 7200 )),\"lands_at\":140},\"five_hour\":{},\"fable\":{}}}")
+out=$(gov_run "{\"gauge\":{\"seven_day\":{\"median\":90,\"hours_to_reset\":84,\"resets_at\":$(( R7 - 7200 )),\"lands_at\":140},\"five_hour\":{},\"premium\":{}}}")
 chk "H12 two-hour-old file reads stale" \
   "$(printf '%s' "$out" | jq -r '.age_s | if . > 900 then "stale" else "fresh" end')" "stale"
+
+# H14. the premium window is a MIX signal, not a stop signal. Its spend is
+# already inside seven_day, so counting it again in `worst` would govern twice
+# on the same tokens -- and a family sitting past its self-imposed share is a
+# reason to move work down a tier, never a reason to work less.
+out=$(gov_run "{\"gauge\":{\"seven_day\":{\"median\":30,\"hours_to_reset\":84,\"resets_at\":$R7,\"lands_at\":55,\"burn_ratio\":0.6},\"five_hour\":{},\"premium\":{\"median\":80,\"lands_at\":200,\"burn_ratio\":3.0,\"family\":\"fable\"}}}")
+chk "H14 premium is reported"          "$(printf '%s' "$out" | jq -r '.premium.lands')" "200"
+chk "H14 premium names its family"     "$(printf '%s' "$out" | jq -r '.premium.family')" "fable"
+chk "H14 premium stays out of worst"   "$(printf '%s' "$out" | jq -r '.worst')" "55"
+
+# H15. no premium family on this install: every field null, and null must not
+# read as zero -- "nothing to ration" and "rationing perfectly" are not the
+# same state, and the second one is a claim.
+out=$(gov_run "{\"gauge\":{\"seven_day\":{\"median\":30,\"hours_to_reset\":84,\"resets_at\":$R7,\"lands_at\":55},\"five_hour\":{}}}")
+chk "H15 absent premium reads null"    "$(printf '%s' "$out" | jq -r '[.premium.used, .premium.lands, .premium.family] | map(tostring) | join(",")')" "null,null,null"
+chk "H15 and does not disturb worst"   "$(printf '%s' "$out" | jq -r '.worst')" "55"
 
 echo
 if [ "$FAIL" -gt 0 ]; then echo "INSTALLER: $PASS passed, $FAIL FAILED"; exit 1; fi

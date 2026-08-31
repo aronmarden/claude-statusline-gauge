@@ -25,7 +25,7 @@ jq -c '{
 # maintains:
 #
 #   $usage_dir/usage-hourly.jsonl   per-hour token aggregates
-#   $usage_dir/share.json           premium-model share of the 7d window
+#   $usage_dir/share.json           premium-family share of the 7d window
 #
 # usage-collector.sh (shipped alongside this script) produces both from Claude
 # Code's own transcripts. Point CLAUDE_STATUSLINE_USAGE_DIR at your own
@@ -45,16 +45,38 @@ if [ -x "$collector" ] && [ -d "$HOME/.claude/projects" ]; then
   ( "$collector" --if-stale >/dev/null 2>&1 & ) >/dev/null 2>&1
 fi
 
-# Premium-model (fable) share of the 7d window. Claude Code's payload has no
-# fable rate-limit window (only five_hour/seven_day), so the only source is
-# share.json, refreshed by the collector. Missing or unparsable => the segment
-# is simply omitted rather than rendered as a guess.
-fable=$(jq -c '{
-  share:     (.fable_share_of_7d.share // null),
-  allowance: (.fable_share_of_7d.allowance // 0.5),
-  age:       (now - (.generated_at_epoch // 0))
-}' "$share_file" 2>/dev/null)
-[ -n "$fable" ] || fable=null
+# The premium family's share of the 7d window. Claude Code's payload has no
+# premium rate-limit window (only five_hour/seven_day), so the only source is
+# share.json, refreshed by the collector.
+#
+# WHICH family is premium, what a token of it costs, and what the gauge is
+# called are ALL read from here, never re-derived. The collector resolves them
+# once (from CLAUDE_STATUSLINE_PREMIUM_* or by auto-detection) and writes the
+# answer down; if this script re-derived them it could weight a different set
+# of rows than the collector counted, and the two numbers would disagree
+# silently. One resolver, one answer, written to the file both sides read.
+#
+# A null premium block is the collector saying "this install runs no premium
+# family" -- not a zero. It renders as NO GAUGE, because a 0.00% bar against a
+# policy you are not exercising is an assertion, and a wrong one.
+# OLD SCHEMA: a share.json written before this key existed only ever described
+# one family, so it is read as exactly that and the gauge keeps working until
+# the collector's next run (<=5 min) rewrites the file.
+prem=$(jq -c '
+  (if   has("premium_share_of_7d") then .premium_share_of_7d
+   elif has("fable_share_of_7d")   then
+     (.fable_share_of_7d | if . == null then null
+      else {family: "fable", label: "fable", weight: 2} + . end)
+   else null end) as $p
+  | if $p == null or $p.share == null then null
+    else {family:    ($p.family // "premium"),
+          label:     ($p.label  // ($p.family // "prm") | .[0:6]),
+          weight:    ($p.weight // 1),
+          share:     $p.share,
+          allowance: ($p.allowance // 0.5),
+          age:       (now - (.generated_at_epoch // 0))}
+    end' "$share_file" 2>/dev/null)
+[ -n "$prem" ] || prem=null
 
 # Rolling pace-delta history (last 10 refreshes per window) feeds the trend
 # arrow next to each delta number. Stateless jq can't persist across
@@ -64,7 +86,7 @@ fable=$(jq -c '{
 trend_file="$HOME/.claude/.pace-trend.json"
 if [ ! -f "$trend_file" ]; then
   init_tmp="${trend_file}.tmp.$$"
-  printf '{"five_hour":[],"seven_day":[],"fable":[],"raw":{"five_hour":[],"seven_day":[]},"gauge":{"seven_day":{}}}' > "$init_tmp" 2>/dev/null && mv -f "$init_tmp" "$trend_file" 2>/dev/null
+  printf '{"five_hour":[],"seven_day":[],"premium":[],"raw":{"five_hour":[],"seven_day":[]},"gauge":{"seven_day":{}}}' > "$init_tmp" 2>/dev/null && mv -f "$init_tmp" "$trend_file" 2>/dev/null
 fi
 
 # Real spend, not a cached percentage: resolve resets_at for BOTH windows
@@ -110,7 +132,7 @@ IFS='|' read -r bash_r7 bash_r5 <<<"$bash_resets"
 
 # Bounded tail (never the whole file -- it grows forever): 5000 lines covers
 # ~7 days at several times today's row density. One tail, one jq pass, three
-# windows: 7d and fable (fable is a 2x-weighted SHARE of the 7d window, not
+# windows: 7d and the premium family (a weighted SHARE of the 7d window, not
 # a window of its own) share the same 168h clock and the same trailing-6h
 # "recent rate" bucket; 5h gets its own, much shorter, window (see the 5h
 # actual_rate comment in the main jq below for why it does NOT reuse the 6h
@@ -126,10 +148,17 @@ $(jq -nr --arg r7 "$bash_r7" --arg r5 "$bash_r5" '
       ((now - 6*3600) | h) ] | join("|")' 2>/dev/null)
 HOURSEOF
   usage_agg=$(tail -n 5000 "$usage_file" 2>/dev/null | jq -sc \
-      --arg ws7 "${ws7:-}" --arg ws5 "${ws5:-}" --arg cur "${cur:-}" --arg rws "${rws:-}" '
+      --arg ws7 "${ws7:-}" --arg ws5 "${ws5:-}" --arg cur "${cur:-}" --arg rws "${rws:-}" \
+      --argjson prem "$prem" '
       def totrow: (.cache_creation_input_tokens + .cache_read_input_tokens
                    + .input_tokens + .output_tokens);
-      def oe: totrow * (if .family == "fable" then 2 else 1 end);
+      # Family and weight come from share.json (see the $prem block above), so
+      # the rows weighted here are exactly the rows the collector counted. With
+      # no premium family resolved $pf matches nothing and every row weighs 1,
+      # which is also the honest reading: nothing here costs more than baseline.
+      ($prem.family // "") as $pf
+      | ($prem.weight // 1) as $pw
+      | def oe: totrow * (if .family == $pf then $pw else 1 end);
       def by_hour($rows): ($rows
           | group_by(.hour)
           | map({hour: .[0].hour, oe: (map(oe) | add)})
@@ -152,23 +181,23 @@ HOURSEOF
           tokens_in_window: (if $ws5 == "" then null
                               else (map(select(.hour >= $ws5)) | map(oe) | add // 0) end)
         },
-        fable: {
-          tokens_in_window: (if $ws7 == "" then null
-                              else (map(select(.hour >= $ws7 and .family == "fable"))
+        premium: {
+          tokens_in_window: (if $ws7 == "" or $pf == "" then null
+                              else (map(select(.hour >= $ws7 and .family == $pf))
                                     | map(oe) | add // 0) end),
-          by_hour: (if $ws7 == "" then []
+          by_hour: (if $ws7 == "" or $pf == "" then []
                      else by_hour(map(select(.hour < $cur and .hour >= $rws
-                                              and .family == "fable"))) end),
-          cur_oe: (map(select(.hour == $cur and .family == "fable")) | map(oe) | add // 0)
+                                              and .family == $pf))) end),
+          cur_oe: (map(select(.hour == $cur and .family == $pf)) | map(oe) | add // 0)
         }
       }
     ' 2>/dev/null)
-  [ -n "$usage_agg" ] || usage_agg='{"file_present":true,"cur_frac":0,"seven_day":{"tokens_in_window":0,"by_hour":[],"cur_oe":0},"five_hour":{"tokens_in_window":0},"fable":{"tokens_in_window":0,"by_hour":[],"cur_oe":0}}'
+  [ -n "$usage_agg" ] || usage_agg='{"file_present":true,"cur_frac":0,"seven_day":{"tokens_in_window":0,"by_hour":[],"cur_oe":0},"five_hour":{"tokens_in_window":0},"premium":{"tokens_in_window":null,"by_hour":[],"cur_oe":0}}'
 else
-  usage_agg='{"file_present":false,"cur_frac":0,"seven_day":{"tokens_in_window":null,"by_hour":[],"cur_oe":0},"five_hour":{"tokens_in_window":null},"fable":{"tokens_in_window":null,"by_hour":[],"cur_oe":0}}'
+  usage_agg='{"file_present":false,"cur_frac":0,"seven_day":{"tokens_in_window":null,"by_hour":[],"cur_oe":0},"five_hour":{"tokens_in_window":null},"premium":{"tokens_in_window":null,"by_hour":[],"cur_oe":0}}'
 fi
 
-trend_hist=$(jq -c --slurpfile prev "$trend_file" --argjson fable "$fable" --argjson usage_agg "$usage_agg" '
+trend_hist=$(jq -c --slurpfile prev "$trend_file" --argjson prem "$prem" --argjson usage_agg "$usage_agg" '
   def epoch:
     if   . == null      then null
     elif type == "number" then (if . > 100000000000 then . / 1000 else . end)
@@ -240,8 +269,8 @@ trend_hist=$(jq -c --slurpfile prev "$trend_file" --argjson fable "$fable" --arg
   # snapshot can never yank the calibration on its own. First-ever
   # calibration (no persisted allowance) is the one case allowed to set it
   # directly, since there is nothing yet to disagree with. Not used for
-  # fable: fable is a SHARE of the 7d allowance (derived, not independently
-  # calibrated -- see the fable block below).
+  # Not used for the premium family: that is a SHARE of the 7d allowance
+  # (derived, not independently calibrated -- see the premium block below).
   # CALIBRATION FLOOR, arithmetic behind the number: allowance = tokens /
   # (p/100), so moving from p to p+-1 scales the allowance by a factor of
   # p/(p+-1). At p=10 that is a 9-11% swing from a single point of payload
@@ -447,19 +476,19 @@ trend_hist=$(jq -c --slurpfile prev "$trend_file" --argjson fable "$fable" --arg
             then null else ($tokens_in_window / $allowance * 100 / $elapsed_h) end)
        else
          # For a window long enough that a trailing block of complete
-         # calendar hours is a meaningful "recent" sample (7d, and fable’s
-         # share of it): needs >=2 complete hours or it is one noisy hour,
-         # not a rate.
+         # calendar hours is a meaningful "recent" sample (7d, and the
+         # premium family’s share of it): needs >=2 complete hours or it is
+         # one noisy hour, not a rate.
          #
          # HOURS OBSERVED vs HOURS PRESENT. $bh only contains hours that had
          # spend, so its own length answers "how many hours did I work",
          # which is the right denominator for 7d (its own rows ARE the
          # sample). It is the WRONG denominator for a filtered sub-stream
-         # like fable: fable rows only exist for hours fable ran, so an idle
-         # fable window produced an empty array and therefore a null rate --
+         # like the premium family: its rows only exist for hours it ran, so an
+         # idle premium window produced an empty array and therefore a null rate --
          # "unknown" -- when the honest answer is a measured ZERO. The
          # caller passes $rate_src.hours_observed = the hour count the usage
-         # file was actually READ for (7d’s own array), so fable is averaged
+         # file was actually READ for (7d’s own array), so premium is averaged
          # over the same hours 7d saw. Genuinely absent data (no usage file,
          # or 7d itself short of hours) still lands on < 2 and still reads
          # "–"; measured zero now reads as zero, which gauge_math already
@@ -538,8 +567,8 @@ trend_hist=$(jq -c --slurpfile prev "$trend_file" --argjson fable "$fable" --arg
   # and an integer percentage that only moves on resync cannot supply one.
   # $divergence now flags the reverse case from before: the displayed
   # payload figure disagreeing with the local token derivation -- usually
-  # off-machine spend, or an allowance still converging. (fable has no live
-  # payload reading at all -- see the fable block -- so it is always
+  # off-machine spend, or an allowance still converging. (the premium family
+  # has no live payload reading at all -- see its block -- so it is always
   # token-derived and carries no cross-check/marker, by construction.)
   | ([["five_hour", 18000], ["seven_day", 604800]]
      | map(
@@ -701,55 +730,64 @@ trend_hist=$(jq -c --slurpfile prev "$trend_file" --argjson fable "$fable" --arg
        allowance_history: $ahist_5, divergence: $div_5, resets_at_missing_count: $miss5
      } + $gm5) as $gauge_five_hour
 
-  # ================= fable =================
-  # Fable is not a window of its own: it is a 2x-weighted SHARE of the 7d
-  # window (per share.json fable_share_of_7d.allowance, 0.5 = half). Its
-  # allowance is therefore DERIVED from the already-calibrated (and now
+  # ================= premium family =================
+  # The premium family is not a window of its own: it is a weighted SHARE of
+  # the 7d window (per share.json premium_share_of_7d.allowance, 0.5 = half).
+  # Its allowance is therefore DERIVED from the already-calibrated (and now
   # floor/step-guarded) 7d allowance rather than independently calibrated
-  # against a payload reading -- there is no live "fable used%" field in
+  # against a payload reading -- there is no live "premium used%" field in
   # the Claude Code payload to calibrate against, and multiplying the 7d
   # allowance by the share fraction is exact (no agreement gate needed,
   # because nothing here can disagree with itself). It shares the 7d
-  # resets_at/clock -- fable’s slice resets when the 7d window does.
-  # NOT sanity-clamped like seven_day/five_hour above: fable’s allowance
+  # resets_at/clock -- the slice resets when the 7d window does.
+  # NOT sanity-clamped like seven_day/five_hour above: this allowance
   # cannot independently collapse (it is a fixed multiple of 7d’s, already
-  # guarded), so a fable reading over 150% is a real signal -- fable
+  # guarded), so a reading over 150% is a real signal -- the family
   # genuinely spending past its share -- not a broken calibration, and
   # clamping it would suppress the one thing this gauge exists to show
   # (see harness case 17, a real 220% overage rendered plainly).
-  | ($fable.allowance // 0.5) as $fable_frac
-  | (if $allow_7 == null then null else ($allow_7 * $fable_frac) end) as $allow_f
-  | ($usage_agg.fable.tokens_in_window) as $tok_f
+  | ($prem.allowance // 0.5) as $prem_frac
+  | (if $allow_7 == null then null else ($allow_7 * $prem_frac) end) as $allow_f
+  | ($usage_agg.premium.tokens_in_window) as $tok_f
   | (if $tok_f == null or $allow_f == null or $allow_f <= 0 then null
      else ([($tok_f / $allow_f * 100), 0] | max) end) as $used_f
-  # MEASURED ZERO IS NOT MISSING DATA. fable’s by_hour only has rows for
-  # hours fable actually ran, so an idle fable window produced an empty
-  # array, a null rate and "lands –" -- reported as unknown when it was
-  # known, and known to be zero. The proof of which case we are in is 7d’s
-  # own by_hour: if the usage file yielded >= 2 complete hours there, those
-  # hours WERE read, so fable having none of them is a measurement, not a
-  # gap. So fable is averaged over the hours 7d observed (hours_observed),
-  # and rate 0 flows into gauge_math’s existing $actual_rate <= 0 branch --
-  # lands where you are, which is the right answer for spending nothing.
-  # Genuinely absent data (no usage file, or 7d itself short of complete
-  # hours) leaves hours_observed < 2 and still renders "–".
+  # MEASURED ZERO IS NOT MISSING DATA -- and it is not "you do not run this
+  # family" either. Those are three different things and they render three
+  # different ways:
+  #   no premium family resolved  -> $prem is null, tokens_in_window is null,
+  #                                  and the render gate below drops the whole
+  #                                  segment. Nothing is claimed.
+  #   family resolved, no spend   -> a real, measured 0.00% (see below).
+  #   family resolved, no data    -> "–". Unknown, and said so.
+  # The middle case: the family’s by_hour only has rows for hours it actually
+  # ran, so an idle window produced an empty array, a null rate and "lands –"
+  # -- reported as unknown when it was known, and known to be zero. The proof
+  # of which case we are in is 7d’s own by_hour: if the usage file yielded
+  # >= 2 complete hours there, those hours WERE read, so the premium family
+  # having none of them is a measurement, not a gap. So it is averaged over
+  # the hours 7d observed (hours_observed), and rate 0 flows into
+  # gauge_math’s existing $actual_rate <= 0 branch -- lands where you are,
+  # which is the right answer for spending nothing. Genuinely absent data
+  # (no usage file, or 7d itself short of complete hours) leaves
+  # hours_observed < 2 and still renders "–".
   | (gauge_math($used_f; $r7; $now; 604800; $allow_f; $tok_f;
-                {by_hour: $usage_agg.fable.by_hour,
+                {by_hour: $usage_agg.premium.by_hour,
                  hours_observed: ($usage_agg.seven_day.by_hour | length),
-                 cur_oe: $usage_agg.fable.cur_oe, cur_frac: $usage_agg.cur_frac};
-                "hours"; (($prev.gauge // {}).fable.ratio_trend))) as $gmf
-  | (append_allowance_history((($prev.gauge // {}).fable.allowance_history);
-                               (($prev.gauge // {}).fable.allowance); $allow_f; $now)) as $ahist_f
-  # Fable is the one gauge with no payload alternative, so it is ALWAYS
+                 cur_oe: $usage_agg.premium.cur_oe, cur_frac: $usage_agg.cur_frac};
+                "hours"; (($prev.gauge // {}).premium.ratio_trend))) as $gmf
+  | (append_allowance_history((($prev.gauge // {}).premium.allowance_history);
+                               (($prev.gauge // {}).premium.allowance); $allow_f; $now)) as $ahist_f
+  # This is the one gauge with no payload alternative, so it is ALWAYS
   # token-derived -- which makes it the reason $allow_7 must be able to
   # converge at all. Its allowance is a fixed fraction of 7d’s, so once the
-  # stability gate lets 7d’s allowance track the truth, fable’s percentage
+  # stability gate lets 7d’s allowance track the truth, this percentage
   # moves onto the same scale automatically; while 7d’s allowance was frozen
-  # 17 points low, fable was reading proportionally low too, silently.
+  # 17 points low, this was reading proportionally low too, silently.
   | ({ median: ($used_f // null), payload_median: null, provisional: false,
        payload_stable: false, source: "tokens",
+       family: ($prem.family // null), weight: ($prem.weight // null),
        resets_at: $r7, allowance: $allow_f, allowance_history: $ahist_f,
-       divergence: null } + $gmf) as $gauge_fable
+       divergence: null } + $gmf) as $gauge_premium
 
   | {
       raw: $raw,
@@ -757,12 +795,12 @@ trend_hist=$(jq -c --slurpfile prev "$trend_file" --argjson fable "$fable" --arg
       gauge: {
         seven_day: $gauge_seven_day,
         five_hour: $gauge_five_hour,
-        fable: $gauge_fable
+        premium: $gauge_premium
       }
     }
 ' <<<"$input" 2>/dev/null)
 
-[ -n "$trend_hist" ] || trend_hist='{"five_hour":[],"seven_day":[],"fable":[],"raw":{"five_hour":[],"seven_day":[]},"gauge":{"seven_day":{}}}'
+[ -n "$trend_hist" ] || trend_hist='{"five_hour":[],"seven_day":[],"premium":[],"raw":{"five_hour":[],"seven_day":[]},"gauge":{"seven_day":{}}}'
 # Multiple Claude Code sessions share this one file. Writing straight to it
 # with `>` lets two concurrent writers interleave and corrupt it (seen in
 # the wild: valid JSON with garbage trailing bytes), which then makes every
@@ -794,7 +832,7 @@ jq -nr \
   --argjson cols "${COLUMNS:-0}" \
   --argjson trend_hist "$trend_hist" \
   --argjson usage_present "$({ [ -f "$usage_file" ] || [ -f "$share_file" ]; } && echo true || echo false)" \
-  --argjson fable "$fable" \
+  --argjson prem "$prem" \
   --arg branch "$branch" \
   --arg home "$HOME" \
   --arg cwd_fallback "$cwd" '
@@ -876,7 +914,7 @@ jq -nr \
     elif $sign < 0 then " ↓"
     else "" end;
 
-  # --- three usage gauges (5h / 7d / fable), rendered on their own line ----
+  # --- the usage gauges (5h / 7d / premium), on their own line ------------
   # Same shape for all three: a 20-cell bar whose |> fill is the used% the
   # state update chose for this window -- the payload’s own figure while it
   # is provably stable, the token derivation while it is rotating (see the
@@ -973,7 +1011,7 @@ jq -nr \
   # A zero or unknown delta still renders nothing: there is no gap to
   # express, and "no data" must not read as "on the line" here either.
   # $pph is points-per-hour for THIS gauge’s own window (100 /
-  # window_hours) -- 5h=20, 7d=0.5952; fable rides the 7d clock (same
+  # window_hours) -- 5h=20, 7d=0.5952; premium rides the 7d clock (same
   # $frac7 marker as seven_day, confirmed at the call site below) so it
   # uses 7d’s 0.5952 too, not a share-scaled rate of its own.
   def catchup_text($pd; $c; $pph):
@@ -1113,16 +1151,26 @@ jq -nr \
      else {key: "five_hour"} + render_gauge($trend_hist.gauge.five_hour; $frac5; "5h"; $gn; 5) end) as $g5
   | (if $rl.seven_day == null then null
      else {key: "seven_day"} + render_gauge($trend_hist.gauge.seven_day; $frac7; "7d"; $gn; 168) end) as $g7
-  # Fable shares the 7d clock (its slice resets when the 7d window does), so
-  # it uses $frac7 too, not a marker of its own. No live payload field feeds
-  # fable at all -- there is nothing to cross-check it against -- so it
-  # never carries a divergence "!" or a "prov" tag, only share.json’s own
-  # staleness (the collector refreshes every 5 min; three missed cycles means
-  # the number is no longer describing now, so say so instead of pretending).
-  | (if ($fable.age // 0) > 900 then (" stale" | dim) else "" end) as $fable_stale
-  | (if $fable == null or $fable.share == null or $rl.seven_day == null then null
-     else ({key: "fable"} + render_gauge($trend_hist.gauge.fable; $frac7; "fbl"; $gn; 168)
-           | .pct += $fable_stale) end) as $gf
+  # The premium family shares the 7d clock (its slice resets when the 7d
+  # window does), so it uses $frac7 too, not a marker of its own. No live
+  # payload field feeds it at all -- there is nothing to cross-check it
+  # against -- so it never carries a divergence "!" or a "prov" tag, only
+  # share.json’s own staleness (the collector refreshes every 5 min; three
+  # missed cycles means the number is no longer describing now, so say so
+  # instead of pretending).
+  #
+  # $prem is null when the collector resolved no premium family -- this
+  # machine does not run one -- and the segment is then omitted entirely.
+  # That is the whole point: a gauge for a policy you are not exercising is
+  # noise, and a 0.00% bar with a pace delta beside it is worse than noise,
+  # because it reads as a measurement of under-use. Two gauges, no claim.
+  # The label is the family’s own name (or CLAUDE_STATUSLINE_PREMIUM_LABEL),
+  # so the third gauge says which family it is rationing.
+  | (if ($prem.age // 0) > 900 then (" stale" | dim) else "" end) as $prem_stale
+  | (if $prem == null or $prem.share == null or $rl.seven_day == null then null
+     else ({key: "premium"}
+           + render_gauge($trend_hist.gauge.premium; $frac7; ($prem.label // "prm"); $gn; 168)
+           | .pct += $prem_stale) end) as $gf
 
   | ([$g5, $g7, $gf] | map(select(. != null))) as $gauges
   | (def part($withbar; $withcatchup):
@@ -1134,9 +1182,9 @@ jq -nr \
        + (if .delta != "" then " " + .delta else "" end);
      # Drop order: catch-up parentheticals go first everywhere (each is
      # only the elaboration on a delta that already carries the signal),
-     # least-protected gauge first -- fable (level 1), then 5h (level 2),
+     # least-protected gauge first -- premium (level 1), then 5h (level 2),
      # then 7d (level 3, all three catch-ups now gone). Only past that do
-     # bars start dropping, same priority -- fable’s bar (level 4), then
+     # bars start dropping, same priority -- premium’s bar (level 4), then
      # 5h’s (level 5). 7d’s bar never drops; the percentage always
      # survives even when its bar does not. The gauges have their own
      # line now (width pressure from the rest of the status line is
@@ -1144,11 +1192,11 @@ jq -nr \
      # this should essentially never trigger on a normal terminal.
      def withbar($key; $level):
        if   $key == "seven_day" then true
-       elif $key == "fable"     then $level < 4
+       elif $key == "premium"   then $level < 4
        elif $key == "five_hour" then $level < 5
        else true end;
      def withcatchup($key; $level):
-       if   $key == "fable"     then $level < 1
+       if   $key == "premium"   then $level < 1
        elif $key == "five_hour" then $level < 2
        elif $key == "seven_day" then $level < 3
        else true end;

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Synthetic-payload test harness for the three token-derived usage gauges
-# (5h / 7d / fable) in ~/.claude/statusline.sh, rendered on their own status
+# Synthetic-payload test harness for the token-derived usage gauges
+# (5h / 7d / premium) in ~/.claude/statusline.sh, rendered on their own status
 # line. Runs the SCRIPT under test with HOME pointed at an isolated per-case
 # temp dir (never touches your real ~/.claude state). Cases seed the real
 # inputs the gauges read -- usage-hourly.jsonl (real token spend) and the
@@ -73,7 +73,15 @@ base_payload() {
   printf '{"model":{"display_name":"Sonnet 5"},"cwd":"%s","transcript_path":"/dev/null","session_id":"testcase00000000","rate_limits":%s}' "$WORKDIR" "$1"
 }
 
-SHARE_FABLE='{"fable_share_of_7d":{"share":0.15,"allowance":0.5},"generated_at_epoch":'"$NOW"'}'
+# The premium gauge's inputs. The collector resolves WHICH family is premium,
+# what it weighs and what it is called, and writes all three here; statusline.sh
+# reads them rather than re-deriving, so these fixtures are the whole contract.
+SHARE_PREM='{"premium_share_of_7d":{"family":"fable","label":"fable","weight":2,"share":0.15,"allowance":0.5},"generated_at_epoch":'"$NOW"'}'
+# No premium family on this install at all: not a zero, an absence.
+SHARE_NONE='{"premium_share_of_7d":null,"generated_at_epoch":'"$NOW"'}'
+# A share.json written before the schema was generalised. It only ever
+# described one family, so it has to keep working, read as exactly that.
+SHARE_OLD='{"fable_share_of_7d":{"share":0.15,"allowance":0.5},"generated_at_epoch":'"$NOW"'}'
 
 # Seeds a non-provisional payload history (5 identical raw samples => stable
 # median, agrees with itself so calibration never gets vetoed by the 3pt
@@ -244,7 +252,7 @@ run_case "16-fable-zero-spend" \
   "$(seed_state "" "" 40 "$ALLOW")" \
   "$(base_payload '{"seven_day":{"used_percentage":40,"resets_at":'"$((NOW+3*86400))"'}}')" \
   "$(usage_row "$(hours_ago 40)" 400000000)" \
-  "$SHARE_FABLE"
+  "$SHARE_PREM"
 
 # 17. fable OVER its allowance: fable-family tokens alone exceed the
 #     derived fable allowance (7d allowance * 0.5 share) -- median must
@@ -257,7 +265,7 @@ run_case "17-fable-over-allowance" \
      usage_row "$(hours_ago 3)" 50000000 fable
      usage_row "$(hours_ago 2)" 50000000 fable
      usage_row "$(hours_ago 1)" 50000000 fable)" \
-  "$SHARE_FABLE"
+  "$SHARE_PREM"
 
 # 19. position EXACTLY at the pace line (used%==pace%==50%, position=1.00):
 #     per brief 1.00 falls in the 1.00-1.15 band -> amber, not green.
@@ -448,10 +456,10 @@ refute "62.00%" "41b: payload median not used once the spread crosses 3"
 
 # 42. THE "%" ON THE PACE DELTA, on all three bars at once. It is points of
 #     the window, and a bare "-2.46" beside a "(24m)" reads as a second
-#     time figure -- it was misread as exactly that. 5h/7d/fable all route
+#     time figure -- it was misread as exactly that. 5h/7d/premium all route
 #     through the one delta_text, so all three must carry it.
 #     Deterministic by construction: 7d pace 57.14% vs 45% used => -12.14;
-#     5h pace 80% vs 19% => -61.00; fable 100M oe of a 500M derived
+#     5h pace 80% vs 19% => -61.00; premium 100M oe of a 500M derived
 #     allowance = 20% vs the same 57.14% 7d pace => -37.14. Tokens are
 #     chosen so the 7d allowance predicts exactly the payload (450M / 1e9
 #     == 45%) and therefore does not move this refresh.
@@ -459,10 +467,10 @@ ALL3_SEED='{"raw":{"five_hour":[19,19,19,19,19],"seven_day":[45,45,45,45,45]},"g
 ALL3_PAYLOAD="$(base_payload '{"seven_day":{"used_percentage":45,"resets_at":'"$R7_3D"'},"five_hour":{"used_percentage":19,"resets_at":'"$((NOW+3600))"'}}')"
 ALL3_USAGE="$(usage_row "$(hours_ago 40)" 350000000
               usage_row "$(hours_ago 40)" 50000000 fable)"
-capture "42-delta-percent-all-three" "$ALL3_SEED" "$ALL3_PAYLOAD" "$ALL3_USAGE" "$SHARE_FABLE"
+capture "42-delta-percent-all-three" "$ALL3_SEED" "$ALL3_PAYLOAD" "$ALL3_USAGE" "$SHARE_PREM"
 expect_re '5h .*-61\.0[0-9]%'  "42: 5h delta carries %"
 expect_re '7d .*-12\.1[0-9]%'  "42: 7d delta carries %"
-expect_re 'fbl .*-37\.1[0-9]%' "42: fable delta carries %"
+expect_re 'fable .*-37\.1[0-9]%' "42: premium delta carries %"
 refute_re '[-+][0-9]+\.[0-9][0-9] ' "42: no unitless delta survives anywhere on the line"
 
 # 43. TIME FIGURE IN BOTH DIRECTIONS, and never confusable between them.
@@ -470,11 +478,11 @@ refute_re '[-+][0-9]+\.[0-9][0-9] ' "42: no unitless delta survives anywhere on 
 #     must show the gap in its own window-time, labelled "behind" -- the
 #     direction word is the thing that stops "4h ahead" being read as
 #     "4h behind". 5h: 61.0pts / 20pts-per-hour = 3.05h. 7d: 12.14 /
-#     0.5952 = 20.4h. fable rides the 7d clock: 37.14 / 0.5952 = 62.4h,
+#     0.5952 = 20.4h. premium rides the 7d clock: 37.14 / 0.5952 = 62.4h,
 #     past the 48h day-formatting boundary => 2.6d.
 expect "(3h behind)"   "43: 5h negative delta renders its time, labelled"
 expect "(20h behind)"  "43: 7d negative delta renders its time, labelled"
-expect "(2.6d behind)" "43: fable negative delta renders its time, in days"
+expect "(2.6d behind)" "43: premium negative delta renders its time, in days"
 refute "(3h)"          "43: no bare unlabelled time survives"
 refute "ahead"         "43: nothing is labelled ahead when every gauge is behind"
 
@@ -538,13 +546,13 @@ refute "lands"     "58: no \"lands\" placeholder without a usage source"
 refute "–"         "58: no dangling en-dash without a usage source"
 
 echo
-echo "--- asserted cases: fable measured-zero, 5h allowance lifecycle ---"
+echo "--- asserted cases: premium measured-zero, 5h allowance lifecycle ---"
 
 # Tokens are sized so the 7d allowance predicts the payload EXACTLY
 # (450M oe / 1e9 == 45%), so calibration accepts and lands back on 1e9 --
-# which makes fable's derived allowance exactly 0.5e9 and its used% exactly
-# 20.00. Recent hours 1/2/3 give 7d three complete observed hours; the fable
-# spend sits 40h back, so fable's OWN by_hour is empty.
+# which makes the premium family's derived allowance exactly 0.5e9 and its
+# used% exactly 20.00. Recent hours 1/2/3 give 7d three complete observed
+# hours; the premium spend sits 40h back, so its OWN by_hour is empty.
 ZERO_SEED='{"raw":{"seven_day":[45,45,45,45,45]},"gauge":{"seven_day":{"resets_at":'"$R7_3D"',"allowance":1000000000.0}}}'
 ZERO_PAYLOAD="$(base_payload '{"seven_day":{"used_percentage":45,"resets_at":'"$R7_3D"'}}')"
 ZERO_USAGE="$(usage_row "$(hours_ago 40)" 320000000
@@ -553,22 +561,22 @@ ZERO_USAGE="$(usage_row "$(hours_ago 40)" 320000000
               usage_row "$(hours_ago 2)" 10000000
               usage_row "$(hours_ago 1)" 10000000)"
 
-# 48. FABLE MEASURED ZERO. fable has no rows in the trailing complete hours,
-#     but 7d has three -- so the usage file WAS read for those hours and
-#     fable's absence from them is a measurement of zero, not missing data.
-#     Rate 0 => "spend nothing more, land where you are" => lands == used%.
-capture "48-fable-measured-zero" "$ZERO_SEED" "$ZERO_PAYLOAD" "$ZERO_USAGE" "$SHARE_FABLE"
-expect_re 'fbl .*20\.00%.*0\.00×.*lands 20%' "48: idle fable reads a measured zero rate, lands where it is"
-expect_state '.gauge.fable.actual_rate == 0'  "48: fable actual_rate is 0, not null"
-expect_state '.gauge.fable.lands_at == .gauge.fable.median' "48: lands == used% at rate 0"
+# 48. PREMIUM MEASURED ZERO. The premium family has no rows in the trailing
+#     complete hours, but 7d has three -- so the usage file WAS read for those
+#     hours and the family's absence from them is a measurement of zero, not
+#     missing data. Rate 0 => "spend nothing more, land where you are".
+capture "48-premium-measured-zero" "$ZERO_SEED" "$ZERO_PAYLOAD" "$ZERO_USAGE" "$SHARE_PREM"
+expect_re 'fable .*20\.00%.*0\.00×.*lands 20%' "48: idle premium reads a measured zero rate, lands where it is"
+expect_state '.gauge.premium.actual_rate == 0'  "48: premium actual_rate is 0, not null"
+expect_state '.gauge.premium.lands_at == .gauge.premium.median' "48: lands == used% at rate 0"
 
 # 49. THE OTHER SIDE OF IT: genuinely absent data must STILL read "–".
 #     Same seed, same payload, no usage-hourly.jsonl at all -- so 7d has no
 #     complete observed hours either, and there is nothing to measure. This
 #     is the case case 48 must not swallow: "no file" is not "zero spend".
-capture "49-absent-data-still-dash" "$ZERO_SEED" "$ZERO_PAYLOAD" "" "$SHARE_FABLE"
-expect_re 'fbl .*–  lands –'   "49: no usage file => fable rate is unknown, not zero"
-expect_state '.gauge.fable.actual_rate == null' "49: fable actual_rate is null with no data"
+capture "49-absent-data-still-dash" "$ZERO_SEED" "$ZERO_PAYLOAD" "" "$SHARE_PREM"
+expect_re 'fable .*–  lands –' "49: no usage file => premium rate is unknown, not zero"
+expect_state '.gauge.premium.actual_rate == null' "49: premium actual_rate is null with no data"
 expect_state '.gauge.seven_day.actual_rate == null' "49: 7d likewise has no measurable rate"
 
 # 50. 5h OPPORTUNISTIC CALIBRATION. 5h clears the 20pt floor only during a
@@ -698,6 +706,179 @@ expect_state '.gauge.seven_day.actual_rate <= 5.1429 and .gauge.seven_day.actual
   "57: a two-minute burst can never be divided by two minutes"
 
 echo
+echo "--- asserted cases: which family is premium, and when it is not rendered ---"
+
+# 59. NO PREMIUM FAMILY => NO GAUGE. The collector writes a null premium block
+#     when the install has never run a family that costs more than baseline.
+#     That is an ABSENCE, not a zero, and the one thing it must never do is
+#     render a confident 0.00% bar with a pace delta beside it -- which reads
+#     as "you are under-using something", a measurement nobody took.
+capture "59-no-premium-family" "$ZERO_SEED" "$ZERO_PAYLOAD" "$ZERO_USAGE" "$SHARE_NONE"
+refute_re '(fable|fbl|prm|premium)' "59: no premium family => no third segment at all"
+refute_re '0\.00%'                  "59: and no zero percentage pretending to be one"
+refute_re '▏[^▕]*▕'                 "59: exactly one gauge bar on the line, not two"
+expect_re '7d .*45\.00%'            "59: the 7d gauge is untouched by the absence"
+expect_state '.gauge.premium.median == null' "59: nothing is claimed in the state file either"
+
+# 60. OLD-SCHEMA share.json. A file written before the key was generalised
+#     described exactly one family, weighted 2x, so it is read as exactly that
+#     and keeps working until the collector rewrites it. Same arithmetic as 48.
+capture "60-old-schema-share" "$ZERO_SEED" "$ZERO_PAYLOAD" "$ZERO_USAGE" "$SHARE_OLD"
+expect_re 'fable .*20\.00%'  "60: an old-schema share.json still renders the gauge"
+expect_state '.gauge.premium.weight == 2' "60: and is read at the weight it was written with"
+
+# 61. A COMPLETELY DIFFERENT FAMILY. Nothing in either script is tied to one
+#     model name: family, weight and on-screen label all come from share.json.
+#     30M raw at weight 3 = 90M oe against a 0.5e9 derived allowance => 18.00%.
+#     Every case in this group sizes the payload so the seeded 1e9 allowance
+#     predicts it EXACTLY, which keeps recalibration out of the arithmetic --
+#     otherwise changing the weight moves the 7d allowance too and the numbers
+#     stop being round for reasons that have nothing to do with the weight.
+OTHER_SHARE='{"premium_share_of_7d":{"family":"gpt5","label":"gpt5","weight":3,"share":0.2,"allowance":0.5},"generated_at_epoch":'"$NOW"'}'
+OTHER_USAGE="$(usage_row "$(hours_ago 40)" 330000000
+               usage_row "$(hours_ago 40)" 30000000 gpt5
+               usage_row "$(hours_ago 3)" 10000000
+               usage_row "$(hours_ago 2)" 10000000
+               usage_row "$(hours_ago 1)" 10000000)"
+# 360M non-premium oe + 30M gpt5 raw. At weight w the window totals 360+30w M.
+wseed()    { printf '{"raw":{"seven_day":[%s,%s,%s,%s,%s]},"gauge":{"seven_day":{"resets_at":%s,"allowance":1000000000.0}}}' "$1" "$1" "$1" "$1" "$1" "$R7_3D"; }
+wpayload() { base_payload '{"seven_day":{"used_percentage":'"$1"',"resets_at":'"$R7_3D"'}}'; }
+capture "61-custom-family" "$(wseed 45)" "$(wpayload 45)" "$OTHER_USAGE" "$OTHER_SHARE"
+expect_re 'gpt5 .*18\.00%'   "61: an arbitrary family renders under its own label"
+refute_re '(fable|fbl)'      "61: and nothing anywhere still says fable"
+expect_state '.gauge.premium.family == "gpt5"' "61: the state file names the family it measured"
+
+# 62. THE WEIGHT IS ACTUALLY APPLIED, and it is not a constant. Identical rows,
+#     identical allowance, weight 1 vs weight 2 -- the used% must double. If the
+#     weight were ignored (or hardcoded) both runs would read the same.
+W1_SHARE='{"premium_share_of_7d":{"family":"gpt5","label":"gpt5","weight":1,"share":0.2,"allowance":0.5},"generated_at_epoch":'"$NOW"'}'
+W2_SHARE='{"premium_share_of_7d":{"family":"gpt5","label":"gpt5","weight":2,"share":0.2,"allowance":0.5},"generated_at_epoch":'"$NOW"'}'
+capture "62a-weight-1" "$(wseed 39)" "$(wpayload 39)" "$OTHER_USAGE" "$W1_SHARE"
+expect_re 'gpt5 .*6\.00%'  "62a: weight 1 => 30M oe of a 0.5e9 slice"
+capture "62b-weight-2" "$(wseed 42)" "$(wpayload 42)" "$OTHER_USAGE" "$W2_SHARE"
+expect_re 'gpt5 .*12\.00%' "62b: weight 2 => exactly double, so the weight is real"
+
+echo
+echo "--- asserted cases: the collector's own premium resolution ---"
+
+COLLECTOR="$WORKDIR/usage-collector.sh"
+SHARE_OUT=""; HOURLY_OUT=""
+# Builds one synthetic transcript line per "model:hours_back:tokens" argument.
+transcript() {
+  local i=0 spec m rest hb tk
+  for spec in "$@"; do
+    m="${spec%%:*}"; rest="${spec#*:}"; hb="${rest%%:*}"; tk="${rest##*:}"
+    i=$((i+1))
+    printf '{"type":"assistant","timestamp":"%s","requestId":"r%s","message":{"model":"%s","id":"m%s","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":%s,"cache_read_input_tokens":0}}}\n' \
+      "$(date -u -v-"$hb"H +%Y-%m-%dT%H:%M:%SZ)" "$i" "$m" "$i" "$tk"
+  done
+}
+# Runs the REAL collector over a transcript on stdin, in a disposable HOME.
+# $1 = case name, the rest = VAR=VALUE environment for the run.
+run_collector() {
+  local name="$1"; shift
+  local ch="$WORKDIR/collector-home-$name"
+  rm -rf "$ch"; mkdir -p "$ch/.claude/projects/p"
+  cat > "$ch/.claude/projects/p/session.jsonl"
+  env HOME="$ch" "$@" bash "$COLLECTOR" --full >/dev/null 2>&1
+  SHARE_OUT=$(cat "$ch/.claude/usage/share.json" 2>/dev/null)
+  HOURLY_OUT=$(cat "$ch/.claude/usage/usage-hourly.jsonl" 2>/dev/null)
+  printf '%-34s %s\n' "$name" "$(printf '%s' "$SHARE_OUT" | jq -c '.premium_share_of_7d' 2>/dev/null)"
+  rm -rf "$ch"
+}
+expect_share() {  # $1 = jq filter over share.json, must evaluate true
+  if [ "$(printf '%s' "$SHARE_OUT" | jq -r "$1" 2>/dev/null)" = "true" ]
+  then ok "$2"; else bad "$2" "share check false: $1 :: $SHARE_OUT"; fi
+}
+
+# 63. THE DEFAULT, ON A MACHINE THAT HAS NEVER RUN A PREMIUM FAMILY. This is
+#     the reported defect: six hours of opus-only work used to produce a
+#     0.00% third gauge with a pace delta and a "days behind" figure. Nothing
+#     in that history costs more than the opus-equivalent baseline, so there
+#     is no premium family to resolve and the block is null -- and case 59
+#     above proves null means the gauge does not render.
+run_collector "63-default-no-premium" < <(transcript \
+  opus:6:5000000 opus:5:5000000 opus:4:5000000 \
+  opus:3:5000000 opus:2:5000000 opus:1:5000000)
+expect_share '.premium_share_of_7d == null' "63: opus-only history resolves no premium family"
+expect_share '.generated_at_epoch != null'  "63: the rest of share.json is still written"
+
+# 64. THE DEFAULT, WHEN A PREMIUM FAMILY IS ACTUALLY THERE. Auto-detection
+#     picks the priciest COST-TABLE family present in the retained history and
+#     writes family/label/weight down, so statusline.sh never has to guess.
+#     20M fable at weight 2 = 40M oe; 60M sonnet = 60M oe; share = 40/100.
+run_collector "64-default-autodetect" < <(transcript \
+  fable:3:10000000 fable:2:10000000 sonnet:3:30000000 sonnet:2:30000000)
+expect_share '.premium_share_of_7d.family == "fable"' "64: the priciest family present is detected"
+expect_share '.premium_share_of_7d.weight == 2'       "64: at the cost table's weight, not 1"
+expect_share '.premium_share_of_7d.label  == "fable"' "64: labelled with its own name by default"
+expect_share '.premium_share_of_7d.share  == 0.4'     "64: share is weighted, 40M oe of 100M"
+
+# 65. "NEVER USES IT" vs "ZERO THIS WINDOW" -- the distinction the null block
+#     must not swallow. Selection reads the whole RETAINED file (9 days);
+#     the share is measured over the trailing 7. So a family last used 8 days
+#     ago is still SELECTED, and its zero is a real, measured zero.
+run_collector "65-zero-in-window" < <(transcript \
+  fable:192:10000000 sonnet:3:30000000 sonnet:2:30000000 sonnet:1:30000000)
+expect_share '.premium_share_of_7d.family == "fable"' "65: used 8d ago => still selected"
+expect_share '.premium_share_of_7d.share == 0'        "65: and this window is a measured zero"
+expect_share '.premium_share_of_7d.premium_opus_equivalent_tokens == 0' "65: zero premium tokens in the 7d window"
+expect_share '.premium_share_of_7d.total_opus_equivalent_tokens > 0'    "65: while the window itself is not empty"
+# ... and statusline renders exactly that: a real 0.00%, distinct both from
+# case 59's absent gauge and from an unknown "–". Same 450M oe window as the
+# other cases, but not one premium row inside it.
+NOPREM_USAGE="$(usage_row "$(hours_ago 40)" 420000000
+                usage_row "$(hours_ago 3)" 10000000
+                usage_row "$(hours_ago 2)" 10000000
+                usage_row "$(hours_ago 1)" 10000000)"
+capture "65b-zero-renders" "$(wseed 45)" "$(wpayload 45)" "$NOPREM_USAGE" \
+  "$(printf '%s' "$SHARE_OUT" | jq -c '.generated_at_epoch = '"$NOW")"
+expect_re 'fable .*0\.00%.*0\.00×.*lands 0%' "65b: a selected family with no spend this window is a measured zero"
+refute_re 'fable .*–'  "65b: and never an unknown -- the difference case 59 must not swallow"
+expect_state '.gauge.premium.median == 0' "65b: zero in the state file too, not null"
+
+# 66. AN ENTIRELY DIFFERENT PREMIUM FAMILY, configured. The regex is matched
+#     against the model id, so it can name anything -- and rows are then filed
+#     under that family, which is what keeps the collector and the gauge
+#     counting the same tokens.
+run_collector "66-configured-family" CLAUDE_STATUSLINE_PREMIUM_FAMILY=opus < <(transcript \
+  opus:3:30000000 sonnet:3:30000000 sonnet:2:40000000)
+expect_share '.premium_share_of_7d.family == "opus"' "66: the configured family wins"
+expect_share '.premium_share_of_7d.weight == 1'      "66: weight 1 -- opus IS the opus-equivalent unit"
+expect_share '.premium_share_of_7d.share == 0.3'     "66: 30M of 100M"
+
+# 67. CONFIGURED WEIGHT AND LABEL. The 2x was one family's cost ratio, never a
+#     universal constant, so it has to be settable independently.
+run_collector "67-configured-weight" \
+  CLAUDE_STATUSLINE_PREMIUM_FAMILY=opus CLAUDE_STATUSLINE_PREMIUM_WEIGHT=4 \
+  CLAUDE_STATUSLINE_PREMIUM_LABEL=big CLAUDE_STATUSLINE_PREMIUM_SHARE=0.25 < <(transcript \
+  opus:3:25000000 sonnet:3:100000000)
+expect_share '.premium_share_of_7d.weight == 4'    "67: the configured weight is used"
+expect_share '.premium_share_of_7d.label == "big"' "67: and the configured label"
+expect_share '.premium_share_of_7d.share == 0.5'   "67: 25M at 4x = 100M oe of 200M"
+expect_share '.premium_share_of_7d.allowance == 0.25' "67: the policy fraction is carried through"
+
+# 68. THE SILENT-WRONG-NUMBER GUARD: the collector and the gauge must count the
+#     SAME rows at the SAME weight. Run the real collector, then hand statusline
+#     ITS OWN outputs and check the identity median/100 * allowance == the
+#     collector's own premium token total. If either side used a different
+#     family or a different weight, this number is wrong and nothing else says
+#     so. Every row sits in the last four hours, so both window definitions
+#     (collector: now-7d, gauge: resets_at-7d) enclose all of them.
+run_collector "68-consistency" CLAUDE_STATUSLINE_PREMIUM_WEIGHT=3 < <(transcript \
+  fable:3:10000000 fable:2:10000000 fable:1:10000000 \
+  sonnet:3:30000000 sonnet:2:30000000 sonnet:1:30000000)
+expect_share '.premium_share_of_7d.premium_opus_equivalent_tokens == 90000000' \
+  "68: the collector counted 30M fable at weight 3"
+capture "68b-consistency" \
+  '{"raw":{"seven_day":[40,50,44,52]},"gauge":{"seven_day":{"resets_at":'"$R7_3D"',"allowance":1000000000.0}}}' \
+  "$(base_payload '{"seven_day":{"used_percentage":46,"resets_at":'"$R7_3D"'}}')" \
+  "$HOURLY_OUT" "$(printf '%s' "$SHARE_OUT" | jq -c '.generated_at_epoch = '"$NOW")"
+expect_state '((.gauge.premium.median / 100 * .gauge.premium.allowance) - 90000000 | fabs) < 1' \
+  "68b: the gauge weighed exactly the rows the collector counted, at the same weight"
+expect_state '.gauge.premium.weight == 3' "68b: and it took the weight from share.json, not a constant"
+
+echo
 echo "--- all three gauges at once, at four widths (COLUMNS=200/120/80/60) ---"
 FULL_SEED="$(seed_state 19 "$ALLOW" 45 "$ALLOW" "$((NOW+3*86400))" "$((NOW+3600))")"
 FULL_PAYLOAD="$(base_payload '{"seven_day":{"used_percentage":45,"resets_at":'"$((NOW+3*86400))"'},"five_hour":{"used_percentage":19,"resets_at":'"$((NOW+3600))"'}}')"
@@ -707,7 +888,7 @@ FULL_USAGE="$(usage_row "$(hours_ago 40)" 750000000
               usage_row "$(hours_ago 1)" 10000000
               usage_row "$(hours_ago 40)" 100000000 fable)"
 for c in 200 120 80 60; do
-  HARNESS_COLS="$c" run_case "18-all-three-cols$c" "$FULL_SEED" "$FULL_PAYLOAD" "$FULL_USAGE" "$SHARE_FABLE"
+  HARNESS_COLS="$c" run_case "18-all-three-cols$c" "$FULL_SEED" "$FULL_PAYLOAD" "$FULL_USAGE" "$SHARE_PREM"
 done
 unset HARNESS_COLS
 

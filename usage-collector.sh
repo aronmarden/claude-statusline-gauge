@@ -7,7 +7,9 @@
 # and the whole premium-model gauge):
 #
 #   $USAGE_DIR/usage-hourly.jsonl   {hour, family, model, *_tokens, messages}
-#   $USAGE_DIR/share.json           premium-model share of the trailing 7 days
+#   $USAGE_DIR/share.json           premium-family share of the trailing 7 days
+#                                   (or a null premium block, when you do not
+#                                   run a premium family at all)
 #
 # It reads ~/.claude/projects/**/*.jsonl and nothing else. Nothing leaves the
 # machine. It is self-throttling and self-locking, which is what makes it safe
@@ -26,10 +28,50 @@ USAGE_DIR="${CLAUDE_STATUSLINE_USAGE_DIR:-$HOME/.claude/usage}"
 PROJECTS_DIR="${CLAUDE_STATUSLINE_PROJECTS_DIR:-$HOME/.claude/projects}"
 THROTTLE="${CLAUDE_STATUSLINE_THROTTLE:-300}"       # seconds between real runs
 RETAIN_DAYS="${CLAUDE_STATUSLINE_RETAIN_DAYS:-9}"   # >7 so a 7d window never runs short
-# What fraction of the 7-day window you are willing to let the premium model
-# (fable, weighted 2x) take. 0.5 = half. This is YOUR policy, not a limit the
-# API enforces -- see the README.
+
+# --- the premium-family gauge ------------------------------------------------
+# The third gauge rations ONE model family: the one that costs materially more
+# per token than the rest of your mix, so that moving mechanical work off it
+# actually buys back window. WHICH family that is depends on what you run, so
+# nothing here is hardcoded to a model name.
+#
+#   CLAUDE_STATUSLINE_PREMIUM_FAMILY  extended regex, matched case-insensitively
+#                                     against the model id. Empty (the default)
+#                                     means auto-detect -- see PREMIUM_COST_TABLE
+#                                     in the share block at the bottom.
+#   CLAUDE_STATUSLINE_PREMIUM_WEIGHT  what one of its tokens costs in
+#                                     opus-equivalents. Empty means: the cost
+#                                     table's figure for the resolved family,
+#                                     else 1. Opus is 1 by definition -- it is
+#                                     the unit.
+#   CLAUDE_STATUSLINE_PREMIUM_LABEL   what the gauge is called on screen. Empty
+#                                     means the family name.
+#   CLAUDE_STATUSLINE_PREMIUM_SHARE   what fraction of the 7-day window you are
+#                                     willing to let that family take. 0.5 =
+#                                     half. This is YOUR policy, not a limit the
+#                                     API enforces -- see the README.
+#
+# Changing FAMILY changes how rows are CLASSIFIED, and rows already written keep
+# their old family, so follow a change with `usage-collector.sh --full`.
 PREMIUM_SHARE="${CLAUDE_STATUSLINE_PREMIUM_SHARE:-0.5}"
+PREMIUM_FAMILY="${CLAUDE_STATUSLINE_PREMIUM_FAMILY:-}"
+PREMIUM_WEIGHT="${CLAUDE_STATUSLINE_PREMIUM_WEIGHT:-}"
+PREMIUM_LABEL="${CLAUDE_STATUSLINE_PREMIUM_LABEL:-}"
+
+# The family NAME rows are filed under when PREMIUM_FAMILY is an explicit
+# regex. A bare word is its own name; anything with regex metacharacters in it
+# gets a stable placeholder, because "fable|opus" is not a family name.
+if [ -n "$PREMIUM_FAMILY" ]; then
+  PREMIUM_NAME="$PREMIUM_LABEL"
+  if [ -z "$PREMIUM_NAME" ]; then
+    case "$PREMIUM_FAMILY" in
+      *[!A-Za-z0-9._-]*) PREMIUM_NAME="premium" ;;
+      *)                 PREMIUM_NAME="$PREMIUM_FAMILY" ;;
+    esac
+  fi
+else
+  PREMIUM_NAME=""
+fi
 
 HOURLY="$USAGE_DIR/usage-hourly.jsonl"
 SHARE="$USAGE_DIR/share.json"
@@ -39,7 +81,7 @@ MODE=""
 for arg in "$@"; do
   case "$arg" in
     --if-stale|--full|--status) MODE="$arg" ;;
-    -h|--help) sed -n '2,22p' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
     *) printf 'usage-collector: unknown option %s\n' "$arg" >&2; exit 2 ;;
   esac
 done
@@ -67,9 +109,23 @@ if [ "$MODE" = "--status" ]; then
     printf 'usage-hourly  not written yet\n'
   fi
   if [ -f "$SHARE" ]; then
-    printf 'share.json    %s\n' "$(jq -c '.fable_share_of_7d' "$SHARE" 2>/dev/null)"
+    printf 'share.json    %s\n' "$(jq -c '.premium_share_of_7d // .fable_share_of_7d' "$SHARE" 2>/dev/null)"
   else
     printf 'share.json    not written yet\n'
+  fi
+  if [ -n "$PREMIUM_FAMILY" ]; then
+    printf 'premium       /%s/ (configured), weight %s, filed as "%s"\n' \
+      "$PREMIUM_FAMILY" "${PREMIUM_WEIGHT:-from the cost table, else 1}" "$PREMIUM_NAME"
+  elif [ -f "$SHARE" ]; then
+    printf 'premium       %s\n' "$(jq -r '
+      if .premium_share_of_7d == null and (has("premium_share_of_7d") | not)
+      then "old-schema share.json -- rerun the collector to resolve it"
+      elif .premium_share_of_7d == null
+      then "none auto-detected: nothing in your history costs more than the baseline, so the gauge is not rendered"
+      else "auto-detected \(.premium_share_of_7d.family) at weight \(.premium_share_of_7d.weight)"
+      end' "$SHARE" 2>/dev/null)"
+  else
+    printf 'premium       not resolved yet -- run the collector once\n'
   fi
   exit 0
 fi
@@ -129,9 +185,14 @@ find_min=$(( lookback_min + 120 ))
 # the whole run and costing us every other file in it.
 find "$PROJECTS_DIR" -type f -name '*.jsonl' -mmin -"$find_min" -print0 2>/dev/null \
   | xargs -0 grep -h -a -E '"type": ?"assistant"' /dev/null 2>/dev/null \
-  | jq -Rnc '
+  | jq -Rnc --arg prem_re "$PREMIUM_FAMILY" --arg prem_name "$PREMIUM_NAME" '
+  # An explicitly configured premium family wins the classification outright,
+  # so its rows are filed under one name no matter which ids it spans. The
+  # ladder below it is only the built-in fallback, and it exists so that
+  # auto-detection has named families to choose between.
   def fam:
     if   . == null      then "other"
+    elif $prem_re != "" and test($prem_re; "i") then $prem_name
     elif test("fable")  then "fable"
     elif test("opus")   then "opus"
     elif test("sonnet") then "sonnet"
@@ -186,23 +247,66 @@ if [ -s "$TMP/hourly.new" ] || [ ! -s "$TMP/fresh" ]; then
   mv -f "$TMP/hourly.new" "$HOURLY" 2>/dev/null || true
 fi
 
-# --- premium-model share of the trailing 7 days -----------------------------
-# Opus-equivalent weighting matches statusline.sh: fable counts double,
-# everything else counts once.
+# --- premium-family share of the trailing 7 days ----------------------------
+# This block resolves WHICH family is the premium one and writes the answer --
+# family, weight, label -- into share.json alongside the number. statusline.sh
+# reads all three from here rather than re-deriving them, because a collector
+# that counted one set of rows while the gauge weighted another is a silently
+# wrong number, not a visible bug.
+#
+# PREMIUM_COST_TABLE: families that cost MORE per token than the
+# opus-equivalent baseline, priciest first. Auto-detection only ever picks
+# from this list, and only picks a family that is actually in your history.
+#
+# WHY WEIGHT > 1 IS THE ENTRY CRITERION, and what the default therefore does:
+# this gauge is a cost claim -- "that fraction of my window went somewhere
+# dearer than it had to". For a family weighted 1 the arithmetic degenerates
+# into a plain token-mix ratio, and the 0.5 target becomes a policy nobody
+# set. So a machine that has never run a family from this table gets NO
+# premium block, statusline.sh hides the gauge, and you see two gauges rather
+# than a confident zero. Someone who wants the mix signal for a weight-1
+# family (opus against sonnet, say) opts in with CLAUDE_STATUSLINE_PREMIUM_*
+# and is then stating the policy themselves.
+#
+# APPLICABLE vs ZERO. Selection reads the WHOLE retained file (RETAIN_DAYS,
+# default 9); the share is measured over the trailing 7 days. Retention is
+# deliberately longer than the window, so "used it last week, none this
+# window" selects the family and reports a real, measured 0.00% -- while
+# "never appears at all" selects nothing and the gauge does not render.
+# An explicitly configured family is always applicable: naming it IS the
+# statement that the policy applies to you, so its zero is a measurement too.
 jq -sc --argjson allowance "$PREMIUM_SHARE" \
+       --arg prem_re "$PREMIUM_FAMILY" --arg prem_name "$PREMIUM_NAME" \
+       --arg prem_weight "$PREMIUM_WEIGHT" --arg prem_label "$PREMIUM_LABEL" \
        --arg since "$(jq -nr '(now - 604800) | gmtime | strftime("%Y-%m-%dT%H")')" '
-  def oe: (.input_tokens + .output_tokens
-           + .cache_creation_input_tokens + .cache_read_input_tokens)
-          * (if .family == "fable" then 2 else 1 end);
-  map(select(.hour >= $since))
-  | (map(oe) | add // 0) as $total
-  | (map(select(.family == "fable") | oe) | add // 0) as $prem
-  | {fable_share_of_7d: {
-       share: (if $total > 0 then (($prem / $total) * 10000 | round) / 10000 else 0 end),
-       allowance: $allowance,
-       fable_opus_equivalent_tokens: $prem,
-       total_opus_equivalent_tokens: $total },
-     generated_at: (now | todate),
+  [["fable", 2]] as $cost_table
+  | . as $rows
+  | (if $prem_re != "" then $prem_name
+     else (first($cost_table[]
+                 | .[0] as $f | select(any($rows[]; .family == $f)) | $f) // null)
+     end) as $family
+  | (if $family == null then null
+     elif $prem_weight != "" then ($prem_weight | tonumber)
+     else ((first($cost_table[] | select(.[0] == $family) | .[1])) // 1)
+     end) as $weight
+  | (if $prem_label != "" then $prem_label else ($family // "") end) as $label
+  | def oe: (.input_tokens + .output_tokens
+             + .cache_creation_input_tokens + .cache_read_input_tokens)
+            * (if .family == $family then $weight else 1 end);
+    (if $family == null then {premium_share_of_7d: null}
+     else ($rows | map(select(.hour >= $since))) as $w
+       | ($w | map(oe) | add // 0) as $total
+       | ($w | map(select(.family == $family) | oe) | add // 0) as $prem
+       | {premium_share_of_7d: {
+            family: $family,
+            label: $label,
+            weight: $weight,
+            share: (if $total > 0 then (($prem / $total) * 10000 | round) / 10000 else 0 end),
+            allowance: $allowance,
+            premium_opus_equivalent_tokens: $prem,
+            total_opus_equivalent_tokens: $total }}
+     end)
+  + {generated_at: (now | todate),
      generated_at_epoch: (now | floor)}
 ' "$HOURLY" > "$TMP/share.new" 2>/dev/null
 [ -s "$TMP/share.new" ] && mv -f "$TMP/share.new" "$SHARE"
