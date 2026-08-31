@@ -101,5 +101,120 @@ chk "statusline installed"        "$([ -x "$F/.claude/statusline.sh" ] && echo y
 chk "collector not installed"     "$([ -e "$F/.claude/usage-collector.sh" ] && echo yes || echo no)" "no"
 
 echo
+echo "=== H. --with-governor: the pace governor block in CLAUDE.md ==="
+GOV_B='<!-- BEGIN claude-statusline-gauge pace governor -->'
+GOV_E='<!-- END claude-statusline-gauge pace governor -->'
+
+# H1. no CLAUDE.md at all -- the installer creates one holding just the block.
+G="$ROOT/g"; mkdir -p "$G/.claude"
+HOME="$G" bash "$REPO/install.sh" --from "$REPO" --with-governor >/dev/null 2>&1
+chk "H1 CLAUDE.md created"        "$([ -f "$G/.claude/CLAUDE.md" ] && echo yes)" "yes"
+chk "H1 exactly one BEGIN"        "$(grep -cF "$GOV_B" "$G/.claude/CLAUDE.md")" "1"
+chk "H1 exactly one END"          "$(grep -cF "$GOV_E" "$G/.claude/CLAUDE.md")" "1"
+chk "H1 the do-no-harm rule made it" \
+  "$(grep -cF 'never refuses work' "$G/.claude/CLAUDE.md")" "1"
+
+# H2. somebody's real CLAUDE.md. Their bytes must still be the first bytes of
+# the file, and the pristine backup must be their file, not ours.
+H="$ROOT/h"; mkdir -p "$H/.claude"
+printf '# My rules\n\n- always run the tests\n- never push to main\n' > "$H/.claude/CLAUDE.md"
+cp "$H/.claude/CLAUDE.md" "$ROOT/claudemd.orig"
+orig_bytes=$(wc -c < "$ROOT/claudemd.orig" | tr -d ' ')
+HOME="$H" bash "$REPO/install.sh" --from "$REPO" --with-governor >/dev/null 2>&1
+chk "H2 user content leads, byte-for-byte" \
+  "$(head -c "$orig_bytes" "$H/.claude/CLAUDE.md" | cmp -s - "$ROOT/claudemd.orig" && echo yes)" "yes"
+chk "H2 backup is their file"     "$(cmp -s "$ROOT/claudemd.orig" "$H/.claude/CLAUDE.md.pre-statusline-gauge" && echo yes)" "yes"
+chk "H2 one block appended"       "$(grep -cF "$GOV_B" "$H/.claude/CLAUDE.md")" "1"
+
+# H3. re-running replaces the block instead of stacking a second copy -- two
+# copies would be two sets of rules for Claude to read.
+cp "$H/.claude/CLAUDE.md" "$ROOT/claudemd.installed"
+for _ in 1 2 3; do HOME="$H" bash "$REPO/install.sh" --from "$REPO" --with-governor >/dev/null 2>&1; done
+chk "H3 one BEGIN after 4 runs"   "$(grep -cF "$GOV_B" "$H/.claude/CLAUDE.md")" "1"
+chk "H3 one END after 4 runs"     "$(grep -cF "$GOV_E" "$H/.claude/CLAUDE.md")" "1"
+chk "H3 file byte-stable"         "$(cmp -s "$ROOT/claudemd.installed" "$H/.claude/CLAUDE.md" && echo yes)" "yes"
+
+# H4. uninstall gives their file back exactly, separator blank line included.
+HOME="$H" bash "$H/.claude/uninstall-statusline-gauge.sh" >/dev/null 2>&1
+chk "H4 CLAUDE.md byte-for-byte"  "$(cmp -s "$ROOT/claudemd.orig" "$H/.claude/CLAUDE.md" && echo yes)" "yes"
+chk "H4 backup cleaned up"        "$([ -e "$H/.claude/CLAUDE.md.pre-statusline-gauge" ] && echo yes || echo no)" "no"
+
+# H5. the realistic case: they kept editing the file after install, on both
+# sides of the block. Restoring the backup would silently eat that, so the
+# uninstaller strips in place instead.
+I="$ROOT/i"; mkdir -p "$I/.claude"
+printf '# Rules\n\n- one\n' > "$I/.claude/CLAUDE.md"
+cp "$I/.claude/CLAUDE.md" "$ROOT/i.orig"
+HOME="$I" bash "$REPO/install.sh" --from "$REPO" --with-governor >/dev/null 2>&1
+{ printf '# Added on top\n\n'; cat "$I/.claude/CLAUDE.md"; printf '\n## Added below\n\n- two\n'; } > "$ROOT/i.edited"
+cp "$ROOT/i.edited" "$I/.claude/CLAUDE.md"
+{ printf '# Added on top\n\n'; cat "$ROOT/i.orig"; printf '\n## Added below\n\n- two\n'; } > "$ROOT/i.expected"
+HOME="$I" bash "$I/.claude/uninstall-statusline-gauge.sh" >/dev/null 2>&1
+chk "H5 edits on both sides survive" "$(cmp -s "$ROOT/i.expected" "$I/.claude/CLAUDE.md" && echo yes)" "yes"
+
+# H6. a CLAUDE.md with no trailing newline. The block cannot be glued onto
+# their last line, and the newline that makes room for it must not survive
+# the uninstall.
+J="$ROOT/j"; mkdir -p "$J/.claude"
+printf '# No trailing newline here' > "$J/.claude/CLAUDE.md"
+cp "$J/.claude/CLAUDE.md" "$ROOT/j.orig"
+HOME="$J" bash "$REPO/install.sh" --from "$REPO" --with-governor >/dev/null 2>&1
+chk "H6 BEGIN starts its own line" "$(sed -n '2p' "$J/.claude/CLAUDE.md")" "$GOV_B"
+HOME="$J" bash "$J/.claude/uninstall-statusline-gauge.sh" >/dev/null 2>&1
+chk "H6 unterminated file byte-for-byte" "$(cmp -s "$ROOT/j.orig" "$J/.claude/CLAUDE.md" && echo yes)" "yes"
+
+# H7. a CLAUDE.md the installer created holding nothing else goes away again.
+HOME="$G" bash "$G/.claude/uninstall-statusline-gauge.sh" >/dev/null 2>&1
+chk "H7 created CLAUDE.md removed" "$([ -e "$G/.claude/CLAUDE.md" ] && echo yes || echo no)" "no"
+
+# H8. opt-in means opt-in: without the flag CLAUDE.md is not read or written.
+K="$ROOT/k"; mkdir -p "$K/.claude"
+printf '# Mine\n' > "$K/.claude/CLAUDE.md"
+cp "$K/.claude/CLAUDE.md" "$ROOT/k.orig"
+HOME="$K" bash "$REPO/install.sh" --from "$REPO" >/dev/null 2>&1
+chk "H8 no flag, CLAUDE.md untouched" "$(cmp -s "$ROOT/k.orig" "$K/.claude/CLAUDE.md" && echo yes)" "yes"
+chk "H8 no flag, no backup taken"     "$([ -e "$K/.claude/CLAUDE.md.pre-statusline-gauge" ] && echo yes || echo no)" "no"
+
+# --- the block's own reader, run exactly as it is written in the file. A block
+# whose jq does not parse is worse than no block: it would be read as rules and
+# then silently produce nothing to apply them to.
+GOVJQ="$(sed -n '/^```sh$/,/^```$/p' "$REPO/pace-governor.md" | sed '1d;$d')"
+L="$ROOT/l"; mkdir -p "$L/.claude"
+gov_run() {  # $1 = .pace-trend.json contents
+  printf '%s' "$1" > "$L/.claude/.pace-trend.json"
+  HOME="$L" bash -c "$GOVJQ" 2>/dev/null
+}
+R7=$(( $(date +%s) + 302400 ))   # 3.5 days out, so the 7d window is half gone
+
+# H9. the collector is present: lands_at is used as-is, and the age is derived
+# from resets_at minus hours_to_reset, which is the only clock the file has.
+out=$(gov_run "{\"gauge\":{\"seven_day\":{\"median\":50,\"hours_to_reset\":84,\"resets_at\":$R7,\"lands_at\":92,\"burn_ratio\":1.1},\"five_hour\":{},\"fable\":{}}}")
+chk "H9 worst is the 7d projection" "$(printf '%s' "$out" | jq -r '.worst')" "92"
+chk "H9 age reads fresh"            "$(printf '%s' "$out" | jq -r '.age_s | if . >= 0 and . < 60 then "fresh" else "stale" end')" "fresh"
+
+# H10. no collector: no lands_at anywhere, so the projection falls back to
+# used% over the elapsed fraction -- half the window gone at 50% used lands 100.
+out=$(gov_run "{\"gauge\":{\"seven_day\":{\"median\":50,\"hours_to_reset\":84,\"resets_at\":$R7},\"five_hour\":{},\"fable\":{}}}")
+chk "H10 degraded projection"       "$(printf '%s' "$out" | jq -r '.seven_day.lands')" "100"
+chk "H10 ratio stays unknown"       "$(printf '%s' "$out" | jq -r '.seven_day.ratio')" "null"
+
+# H11. nothing known at all reads null, never 0 -- "unknown" and "fine" must
+# not render the same.
+out=$(gov_run '{"gauge":{"seven_day":{},"five_hour":{},"fable":{}}}')
+chk "H11 unknown is null, not zero" "$(printf '%s' "$out" | jq -r '[.age_s, .worst] | map(tostring) | join(",")')" "null,null"
+
+# H13. both windows projecting: the TIGHTER one has to govern. 5h is a burst
+# limit and can be the one about to bite while 7d still reads comfortable.
+R5=$(( $(date +%s) + 7200 ))
+out=$(gov_run "{\"gauge\":{\"seven_day\":{\"median\":40,\"hours_to_reset\":84,\"resets_at\":$R7,\"lands_at\":60,\"burn_ratio\":0.7},\"five_hour\":{\"median\":70,\"hours_to_reset\":2,\"resets_at\":$R5,\"lands_at\":120,\"burn_ratio\":1.8},\"fable\":{}}}")
+chk "H13 the tighter window governs"   "$(printf '%s' "$out" | jq -r '.worst')" "120"
+chk "H13 the looser one still reported" "$(printf '%s' "$out" | jq -r '.seven_day.lands')" "60"
+
+# H12. a stale file is not a quiet one: the derived age has to show the gap.
+out=$(gov_run "{\"gauge\":{\"seven_day\":{\"median\":90,\"hours_to_reset\":84,\"resets_at\":$(( R7 - 7200 )),\"lands_at\":140},\"five_hour\":{},\"fable\":{}}}")
+chk "H12 two-hour-old file reads stale" \
+  "$(printf '%s' "$out" | jq -r '.age_s | if . > 900 then "stale" else "fresh" end')" "stale"
+
+echo
 if [ "$FAIL" -gt 0 ]; then echo "INSTALLER: $PASS passed, $FAIL FAILED"; exit 1; fi
 echo "INSTALLER: $PASS passed, 0 failed"

@@ -9,6 +9,8 @@
 #   ~/.claude/usage-collector.sh   installed (optional; --no-collector skips it)
 #   ~/.claude/uninstall-statusline-gauge.sh
 #   ~/.claude/settings.json        ONE key added via jq: .statusLine
+#   ~/.claude/CLAUDE.md            ONE delimited block appended, only with
+#                                  --with-governor (backed up first)
 #
 # Your settings.json is backed up before it is touched, read with jq, rewritten
 # with jq, and every other key in it is carried through untouched. If it is not
@@ -16,6 +18,9 @@
 #
 # Options:
 #   --no-collector    skip the optional usage collector (bars/pace only)
+#   --with-governor   append the pace governor block to ~/.claude/CLAUDE.md, so
+#                     Claude reads the gauges and picks model tier and
+#                     parallelism to suit. Opt-in; removed cleanly on uninstall
 #   --dir <path>      install somewhere other than ~/.claude
 #   --from <path>     install from a local checkout instead of downloading
 set -eu
@@ -24,13 +29,20 @@ REPO_RAW="${CLAUDE_STATUSLINE_REPO_RAW:-https://raw.githubusercontent.com/aronma
 DEST="${HOME}/.claude"
 FROM=""
 WITH_COLLECTOR=1
+WITH_GOVERNOR=0
+
+# The pace governor block is delimited so the uninstaller can lift out exactly
+# it and nothing else. Both scripts hardcode the same two markers.
+GOV_BEGIN='<!-- BEGIN claude-statusline-gauge pace governor -->'
+GOV_END='<!-- END claude-statusline-gauge pace governor -->'
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-collector) WITH_COLLECTOR=0; shift ;;
+    --with-governor) WITH_GOVERNOR=1; shift ;;
     --dir)   DEST="${2:?--dir needs a path}"; shift 2 ;;
     --from)  FROM="${2:?--from needs a path}"; shift 2 ;;
-    -h|--help) sed -n '2,22p' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
     *) printf 'install: unknown option %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -82,9 +94,27 @@ fetch() {  # $1 = filename
   bash -n "$TMP/$1" 2>/dev/null || die "$1 failed a syntax check; refusing to install it."
 }
 
+# Markdown, so the shebang and syntax checks above cannot apply. The equivalent
+# integrity check is that both delimiters survived the trip: a truncated download
+# or an HTML error page has neither, and appending one would leave the
+# uninstaller unable to find where the block ends.
+fetch_doc() {  # $1 = filename
+  if [ -n "$FROM" ]; then
+    [ -f "$FROM/$1" ] || die "$FROM/$1 not found."
+    cp "$FROM/$1" "$TMP/$1"
+  else
+    curl -fsSL "$REPO_RAW/$1" -o "$TMP/$1" \
+      || die "could not download $1 from $REPO_RAW"
+  fi
+  [ -s "$TMP/$1" ] || die "$1 downloaded empty."
+  grep -qF "$GOV_BEGIN" "$TMP/$1" && grep -qF "$GOV_END" "$TMP/$1" \
+    || die "$1 is missing its block markers; refusing to append it."
+}
+
 fetch statusline.sh
 [ "$WITH_COLLECTOR" -eq 1 ] && fetch usage-collector.sh
 fetch uninstall.sh
+[ "$WITH_GOVERNOR" -eq 1 ] && fetch_doc pace-governor.md
 ok "downloaded and syntax-checked"
 
 # --- 3. back up whatever is already there -----------------------------------
@@ -150,6 +180,54 @@ if [ "$after_keys" -lt "$before_keys" ]; then
 fi
 mv -f "$SETTINGS.new" "$SETTINGS"
 ok "settings.json updated ($after_keys top-level keys preserved)"
+
+# --- 5b. pace governor block in CLAUDE.md -----------------------------------
+# Everything EXCEPT the delimited block, byte-exactly. Two details make the
+# round trip lossless. The blank line the appender writes before BEGIN belongs
+# to the block, so it is removed with it. And when there is no such blank line
+# the original had no trailing newline -- the block was appended straight onto
+# its last line -- so that newline must not survive either; $nl carries the
+# same fact for a file that has no block at all.
+strip_governor() {  # $1 = file; stdout = the file without the block
+  nl=1; if [ -s "$1" ] && [ -n "$(tail -c 1 "$1")" ]; then nl=0; fi
+  awk -v b="$GOV_BEGIN" -v e="$GOV_END" -v nl="$nl" '
+    { line[NR] = $0 }
+    END {
+      s = 0; f = 0
+      for (i = 1; i <= NR; i++) { if (!s && line[i] == b) s = i; if (line[i] == e) f = i }
+      n = 0
+      if (!s || f < s) {
+        for (i = 1; i <= NR; i++) out[++n] = line[i]
+        trail = nl
+      } else {
+        cut = (s > 1 && line[s-1] == "") ? s - 1 : s
+        glued = (cut == s && s > 1)
+        for (i = 1; i < cut; i++) out[++n] = line[i]
+        for (i = f + 1; i <= NR; i++) out[++n] = line[i]
+        trail = (f == NR) ? (glued ? 0 : 1) : nl
+      }
+      for (i = 1; i <= n; i++) {
+        if (i == n && !trail) printf "%s", out[i]; else print out[i]
+      }
+    }' "$1"
+}
+
+if [ "$WITH_GOVERNOR" -eq 1 ]; then
+  CLAUDEMD="$DEST/CLAUDE.md"
+  keep_original "$CLAUDEMD"
+  # Strip any block already there before appending, so a re-run replaces it
+  # instead of leaving two copies for Claude to read as two sets of rules.
+  base="$TMP/claude-md.base"
+  if [ -f "$CLAUDEMD" ]; then strip_governor "$CLAUDEMD" > "$base"; else : > "$base"; fi
+  {
+    if [ -s "$base" ]; then cat "$base"; printf '\n'; fi
+    cat "$TMP/pace-governor.md"
+  } > "$CLAUDEMD.new" || die "could not write $CLAUDEMD (original untouched)"
+  grep -qF "$GOV_BEGIN" "$CLAUDEMD.new" && grep -qF "$GOV_END" "$CLAUDEMD.new" \
+    || { rm -f "$CLAUDEMD.new"; die "governor block did not survive the append; original untouched"; }
+  mv -f "$CLAUDEMD.new" "$CLAUDEMD"
+  ok "pace governor block in $CLAUDEMD"
+fi
 
 # --- 6. first collection ----------------------------------------------------
 if [ "$WITH_COLLECTOR" -eq 1 ]; then

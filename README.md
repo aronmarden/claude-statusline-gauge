@@ -42,7 +42,8 @@ The installer:
 It is safe to run again; re-running does not overwrite the original backup and does not change
 `settings.json` a second time.
 
-Options: `--no-collector` (core only, see below), `--dir <path>`, `--from <local checkout>`.
+Options: `--no-collector` (core only, see below), `--with-governor`
+([pace governor](#pace-governor-opt-in)), `--dir <path>`, `--from <local checkout>`.
 
 ### Uninstall
 
@@ -282,6 +283,66 @@ The gauge line degrades on narrow terminals in a fixed order: the `(30h ahead)` 
 go first (`fbl`, then `5h`, then `7d`), then bars (`fbl`, then `5h`). The 7-day bar and every
 percentage always survive.
 
+## Pace governor (opt-in)
+
+The gauges are for you. The same numbers are just as useful to *Claude*, which is the thing
+actually spending the window — but only if it reads them **before** deciding how to do the
+work rather than after.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/aronmarden/claude-statusline-gauge/main/install.sh \
+  | bash -s -- --with-governor
+```
+
+That appends one delimited block to `~/.claude/CLAUDE.md`. It has to be the global one: a
+`CLAUDE.md` in a project only loads while you are working in that project, and a status-line
+repo's own `CLAUDE.md` would load exactly when it does not matter.
+
+The block tells Claude to read `~/.claude/.pace-trend.json` and band on the **projection** —
+where the current burn rate lands the window at its reset — rather than on how much is used
+so far. `used%` is backward-looking: by the time it reads badly, the spend has happened.
+
+| projected landing | how the work is done |
+|---|---|
+| under 85% | normally, and it says nothing about usage |
+| 85–100% | cheaper tier for mechanical work, no wide speculative fan-outs, mentioned once |
+| over 100% | cheapest adequate tier, asks before a parallel fan-out, states the cost before anything large |
+
+It governs on whichever of the 5-hour and 7-day windows is tighter, and the block says why the
+two are not interchangeable: 5h is a burst limit that bites within the hour, 7d is the
+strategic one.
+
+**What it does not do.** It never refuses work, never defers it, and never quietly delivers
+less than you asked for. It changes *how* a job is done — model tier, parallelism, batch size
+— not *whether*. An explicit instruction from you overrides it outright. An assistant that
+declines real work to protect a usage budget is worse than the blowout it was avoiding.
+
+It is also built to say "I don't know" rather than "you're fine": a `.pace-trend.json` older
+than 15 minutes counts as no data, `null` is unknown rather than zero, and with no collector
+installed there is no landing figure at all, so it falls back to used% over the elapsed
+fraction of the window — a whole-window average that lags, and that the block labels as such.
+
+Read [`pace-governor.md`](pace-governor.md) before you install it; it is short, and it is
+going into every session you run.
+
+**Adding it to an existing install** — either re-run the installer with `--with-governor`
+(it replaces the block rather than appending a second copy), or:
+
+```sh
+{ printf '\n'; curl -fsSL https://raw.githubusercontent.com/aronmarden/claude-statusline-gauge/main/pace-governor.md; } \
+  >> ~/.claude/CLAUDE.md
+```
+
+**Removing it** — `bash ~/.claude/uninstall-statusline-gauge.sh` lifts the block out and
+leaves the rest of your `CLAUDE.md` byte-for-byte, including anything you added after
+installing; that is why it strips in place instead of restoring the backup it took. To remove
+it by hand without uninstalling the status line, delete everything between and including:
+
+```
+<!-- BEGIN claude-statusline-gauge pace governor -->
+<!-- END claude-statusline-gauge pace governor -->
+```
+
 ## Files it writes
 
 | | |
@@ -290,6 +351,7 @@ percentage always survive.
 | `~/.claude/.plan-usage.json` | the current window snapshot, so Claude itself can read your remaining capacity when you ask it to |
 | `~/.claude/usage/usage-hourly.jsonl` | per-hour token aggregates, pruned to 9 days |
 | `~/.claude/usage/share.json` | the premium-model share of the last 7 days |
+| `~/.claude/CLAUDE.md` | one delimited block, **only** with `--with-governor`; backed up first |
 
 All local, all removed by the uninstaller.
 
@@ -333,7 +395,7 @@ figure over subsequent refreshes.
 
 ```sh
 bash test_harness.sh    # 38 render cases + 28 assertions on the gauge logic
-bash test_install.sh    # 31 assertions on the installer and uninstaller
+bash test_install.sh    # 57 assertions on the installer, uninstaller and governor
 ```
 
 Both exit non-zero on failure and both run entirely inside disposable `HOME=` sandboxes under
@@ -347,7 +409,10 @@ guards that stop an allowance collapse, and the no-usage-source case.
 
 The installer suite is the paranoid one, because the worst possible bug here is eating somebody's
 `settings.json`: it installs over a populated config and diffs every other key, re-runs itself
-four times, and checks that uninstall restores the original byte-for-byte.
+four times, and checks that uninstall restores the original byte-for-byte. The governor
+cases do the same to `CLAUDE.md`, including a file with no trailing newline and one the
+user kept editing on both sides of the block after installing, and run the block's own jq
+verbatim out of `pace-governor.md` against fresh, stale, degraded and all-null fixtures.
 
 ## Licence
 
