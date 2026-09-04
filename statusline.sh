@@ -1057,14 +1057,14 @@ jq -nr \
        else (($lands | round | tostring) + "%" | paint($lc)) end) as $lands_text
     | (pace_delta($median; $pace_pct)) as $pd
     | { text: $label,
-        pct:  "\($median | dec2)%" + $diverge + $prov + " " + delta_text($pd; $pos_c),
+        pct:  ("\($median | dec2)%" + $diverge + $prov + " " + delta_text($pd; $pos_c)),
         catchup: catchup_text($pd; $pos_c; (100 / $window_hours)),
         bar:  gauge_bar($n; $fill; $mark; $pos_c),
         # No usage source installed at all => omit the rate half of the
         # gauge rather than render a "-" that can never fill in. A "-" here
         # means "there is a source and it cannot answer right now".
         delta: (if $usage_present
-                then " " + $ratio_text + $ratio_arrow + "  lands " + $lands_text
+                then (" " + $ratio_text + $ratio_arrow + "  lands " + $lands_text)
                 else "" end) };
 
   # --- cumulative session token usage -------------------------------------
